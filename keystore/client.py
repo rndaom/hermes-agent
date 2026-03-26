@@ -55,6 +55,15 @@ def _env_file_path() -> Path:
     return _hermes_home() / ".env"
 
 
+def _owned_env_names() -> set[str]:
+    raw = os.getenv("HERMES_KEYSTORE_OWNED_VARS", "")
+    return {x for x in raw.split(",") if x}
+
+
+def _set_owned_env_names(names: set[str]) -> None:
+    os.environ["HERMES_KEYSTORE_OWNED_VARS"] = ",".join(sorted(names))
+
+
 class KeystoreClient:
     """High-level keystore interface for CLI, gateway, and agent startup."""
 
@@ -157,24 +166,42 @@ class KeystoreClient:
         """Inject all ``injectable`` secrets into ``os.environ``.
 
         Args:
-            force: If True, overwrite existing env vars with keystore values.
-                Use this only for explicit refresh flows in long-lived processes
-                (e.g. gateway credential reload). Startup paths should usually
-                keep the default ``False`` so shell exports/Docker env vars win.
+            force: Refresh mode for long-lived processes. When ``False``
+                (default), existing env vars are preserved so shell/Docker env
+                wins over keystore values at startup. When ``True``, only env
+                vars that were previously injected by this client instance are
+                overwritten. Externally provided env vars that were skipped on
+                initial injection remain authoritative across refreshes.
 
         Returns:
             Dict of ``{secret_name: injected_or_overwritten}``.
         """
         secrets = self._store.get_injectable_secrets()
+        previous = dict(self._injected)
+        owned = _owned_env_names()
         injected = {}
         for name, value in secrets.items():
-            if force or name not in os.environ:
+            should_write = False
+            if name not in os.environ:
+                should_write = True
+            elif force and (previous.get(name) is True or name in owned):
+                # Only refresh vars we previously injected ourselves.
+                should_write = True
+
+            if should_write:
                 os.environ[name] = value
                 injected[name] = True
+                owned.add(name)
             else:
-                # Already set in environment (shell export or Docker env)
+                # Existing env var remains authoritative. Preserve ownership
+                # markers for vars we previously injected so later refreshes
+                # can update them. Only discard ownership when the key was
+                # never ours in this process.
                 injected[name] = False
+                if not (previous.get(name) is True or name in owned):
+                    owned.discard(name)
         self._injected = injected
+        _set_owned_env_names(owned)
         count_written = sum(1 for v in injected.values() if v)
         count_skipped = sum(1 for v in injected.values() if not v)
         logger.info(
