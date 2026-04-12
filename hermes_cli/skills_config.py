@@ -20,6 +20,7 @@ PLATFORMS = {
     "cli":      "🖥️  CLI",
     "telegram": "📱 Telegram",
     "discord":  "💬 Discord",
+    "3ds":      "🎮 3DS",
     "slack":    "💼 Slack",
     "whatsapp": "📱 WhatsApp",
     "signal":   "📡 Signal",

@@ -123,6 +123,7 @@ PLATFORMS = {
     "cli":      {"label": "🖥️  CLI",       "default_toolset": "hermes-cli"},
     "telegram": {"label": "📱 Telegram",   "default_toolset": "hermes-telegram"},
     "discord":  {"label": "💬 Discord",    "default_toolset": "hermes-discord"},
+    "3ds":      {"label": "🎮 3DS",         "default_toolset": "hermes-3ds"},
     "slack":    {"label": "💼 Slack",      "default_toolset": "hermes-slack"},
     "whatsapp": {"label": "📱 WhatsApp",   "default_toolset": "hermes-whatsapp"},
     "signal":   {"label": "📡 Signal",     "default_toolset": "hermes-signal"},
@@ -453,6 +454,8 @@ def _get_enabled_platforms() -> List[str]:
         enabled.append("telegram")
     if get_env_value("DISCORD_BOT_TOKEN"):
         enabled.append("discord")
+    if get_env_value("THREEDS_ENABLED"):
+        enabled.append("3ds")
     if get_env_value("SLACK_BOT_TOKEN"):
         enabled.append("slack")
     if get_env_value("WHATSAPP_ENABLED"):
