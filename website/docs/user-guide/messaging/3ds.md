@@ -103,7 +103,7 @@ Then:
 - press `B` to send a typed chat message in the currently selected conversation
 - press `UP` to record mic input and send it through the host-side STT path
 - press `SELECT` to open the conversation picker
-  - `A` = activate a saved conversation slot
+  - `A` = activate the highlighted conversation slot
   - `X` = create a new conversation ID on-device
   - `Y` = sync recent conversation slots from Hermes
 
