@@ -4,6 +4,7 @@ Exposes a small aiohttp server for the Hermes Agent 3DS client:
 - GET  /api/v2/health
 - GET  /api/v2/capabilities
 - POST /api/v2/messages
+- POST /api/v2/voice
 - GET  /api/v2/events
 - POST /api/v2/interactions/{request_id}/respond
 """
@@ -14,6 +15,7 @@ import asyncio
 import logging
 import os
 import socket as _socket
+import tempfile
 import uuid
 from typing import Any, Dict, Optional
 
@@ -166,9 +168,19 @@ class ThreeDSAdapter(BasePlatformAdapter):
         app.router.add_get("/api/v2/health", self._handle_v2_health)
         app.router.add_get("/api/v2/capabilities", self._handle_capabilities)
         app.router.add_post("/api/v2/messages", self._handle_messages)
+        app.router.add_post("/api/v2/voice", self._handle_voice)
         app.router.add_get("/api/v2/events", self._handle_events)
         app.router.add_post("/api/v2/interactions/{request_id}/respond", self._handle_interaction_response)
         return app
+
+    def _message_ack_payload(self, source: SessionSource, conversation_id: str, message_id: str, cursor: int) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "chat_id": source.chat_id,
+            "conversation_id": conversation_id,
+            "message_id": message_id,
+            "cursor": cursor,
+        }
 
     def _health_payload(self) -> dict[str, Any]:
         return {
@@ -297,15 +309,49 @@ class ThreeDSAdapter(BasePlatformAdapter):
             message_id=message_id,
         )
         await self.handle_message(event)
-        return web.json_response(
-            {
-                "ok": True,
-                "chat_id": source.chat_id,
-                "conversation_id": conversation_id,
-                "message_id": message_id,
-                "cursor": ack_cursor,
-            }
-        )
+        return web.json_response(self._message_ack_payload(source, conversation_id, message_id, ack_cursor))
+
+    async def _handle_voice(self, request: "web.Request") -> "web.Response":
+        if not self._is_authorized(request):
+            return web.json_response({"ok": False, "error": "Unauthorized."}, status=401)
+
+        device_id = request.query.get("device_id", "").strip() or self._default_device_id
+        conversation_id = request.query.get("conversation_id", "main").strip() or "main"
+        if not device_id:
+            return web.json_response({"ok": False, "error": "device_id is required."}, status=400)
+
+        audio_bytes = await request.read()
+        if not audio_bytes:
+            return web.json_response({"ok": False, "error": "voice body is required."}, status=400)
+
+        content_type = request.content_type or "audio/wav"
+        source = self._session_source(device_id, conversation_id)
+        message_id = f"user-{uuid.uuid4().hex[:12]}"
+        ack_cursor = self._cursor
+
+        suffix = ".wav" if "wav" in content_type else ".bin"
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(prefix="hermes-3ds-voice-", suffix=suffix, delete=False) as tmp:
+                tmp.write(audio_bytes)
+                tmp_path = tmp.name
+
+            event = MessageEvent(
+                text="",
+                message_type=MessageType.VOICE,
+                source=source,
+                message_id=message_id,
+                media_urls=[tmp_path],
+                media_types=[content_type],
+            )
+            await self.handle_message(event)
+            return web.json_response(self._message_ack_payload(source, conversation_id, message_id, ack_cursor))
+        finally:
+            if tmp_path:
+                try:
+                    os.remove(tmp_path)
+                except FileNotFoundError:
+                    pass
 
     async def _handle_events(self, request: "web.Request") -> "web.Response":
         if not self._is_authorized(request):
