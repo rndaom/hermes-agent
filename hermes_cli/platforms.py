@@ -22,6 +22,7 @@ PLATFORMS: OrderedDict[str, PlatformInfo] = OrderedDict([
     ("cli",            PlatformInfo(label="🖥️  CLI",            default_toolset="hermes-cli")),
     ("telegram",       PlatformInfo(label="📱 Telegram",        default_toolset="hermes-telegram")),
     ("discord",        PlatformInfo(label="💬 Discord",         default_toolset="hermes-discord")),
+    ("3ds",            PlatformInfo(label="🎮 3DS",             default_toolset="hermes-3ds")),
     ("slack",          PlatformInfo(label="💼 Slack",           default_toolset="hermes-slack")),
     ("whatsapp",       PlatformInfo(label="📱 WhatsApp",        default_toolset="hermes-whatsapp")),
     ("signal",         PlatformInfo(label="📡 Signal",          default_toolset="hermes-signal")),

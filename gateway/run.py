@@ -1466,7 +1466,10 @@ class GatewayRunner:
         except Exception:
             pass
         
-        # Warn if no user allowlists are configured and open access is not opted in
+        # Warn if no user allowlists are configured and open access is not opted in.
+        # Native 3DS is token-authenticated at the transport layer, so a 3DS-only
+        # setup should not trigger a misleading allowlist warning.
+        _three_ds_enabled = os.getenv("THREEDS_ENABLED", "").lower() in ("true", "1", "yes")
         _any_allowlist = any(
             os.getenv(v)
             for v in ("TELEGRAM_ALLOWED_USERS", "DISCORD_ALLOWED_USERS",
@@ -1495,7 +1498,7 @@ class GatewayRunner:
                        "WEIXIN_ALLOW_ALL_USERS",
                        "BLUEBUBBLES_ALLOW_ALL_USERS")
         )
-        if not _any_allowlist and not _allow_all:
+        if not _three_ds_enabled and not _any_allowlist and not _allow_all:
             logger.warning(
                 "No user allowlists configured. All unauthorized users will be denied. "
                 "Set GATEWAY_ALLOW_ALL_USERS=true in ~/.hermes/.env to allow open access, "
@@ -2115,6 +2118,13 @@ class GatewayRunner:
                 logger.warning("Discord: discord.py not installed")
                 return None
             return DiscordAdapter(config)
+
+        elif platform == Platform.THREEDS:
+            from gateway.platforms.threeds import ThreeDSAdapter, check_threeds_requirements
+            if not check_threeds_requirements():
+                logger.warning("3DS: aiohttp not installed")
+                return None
+            return ThreeDSAdapter(config)
         
         elif platform == Platform.WHATSAPP:
             from gateway.platforms.whatsapp import WhatsAppAdapter, check_whatsapp_requirements
@@ -2251,7 +2261,8 @@ class GatewayRunner:
         # connection, so HA events are always authorized.
         # Webhook events are authenticated via HMAC signature validation in
         # the adapter itself — no user allowlist applies.
-        if source.platform in (Platform.HOMEASSISTANT, Platform.WEBHOOK):
+        # 3DS requests are authenticated by the native gateway token.
+        if source.platform in (Platform.HOMEASSISTANT, Platform.WEBHOOK, Platform.THREEDS):
             return True
 
         user_id = source.user_id
@@ -3467,7 +3478,7 @@ class GatewayRunner:
         
         # One-time prompt if no home channel is set for this platform
         # Skip for webhooks - they deliver directly to configured targets (github_comment, etc.)
-        if not history and source.platform and source.platform != Platform.LOCAL and source.platform != Platform.WEBHOOK:
+        if not history and source.platform and source.platform not in (Platform.LOCAL, Platform.WEBHOOK, Platform.THREEDS):
             platform_name = source.platform.value
             env_key = f"{platform_name.upper()}_HOME_CHANNEL"
             if not os.getenv(env_key):
@@ -6403,7 +6414,7 @@ class GatewayRunner:
     # Platforms where /update is allowed.  ACP, API server, and webhooks are
     # programmatic interfaces that should not trigger system updates.
     _UPDATE_ALLOWED_PLATFORMS = frozenset({
-        Platform.TELEGRAM, Platform.DISCORD, Platform.SLACK, Platform.WHATSAPP,
+        Platform.TELEGRAM, Platform.DISCORD, Platform.THREEDS, Platform.SLACK, Platform.WHATSAPP,
         Platform.SIGNAL, Platform.MATTERMOST, Platform.MATRIX,
         Platform.HOMEASSISTANT, Platform.EMAIL, Platform.SMS, Platform.DINGTALK,
         Platform.FEISHU, Platform.WECOM, Platform.WECOM_CALLBACK, Platform.WEIXIN, Platform.BLUEBUBBLES, Platform.LOCAL,

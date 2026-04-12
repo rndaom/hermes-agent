@@ -50,6 +50,7 @@ class Platform(Enum):
     LOCAL = "local"
     TELEGRAM = "telegram"
     DISCORD = "discord"
+    THREEDS = "3ds"
     WHATSAPP = "whatsapp"
     SLACK = "slack"
     SIGNAL = "signal"
@@ -282,6 +283,9 @@ class GatewayConfig:
                 connected.append(platform)
             # SMS uses api_key (Twilio auth token) — SID checked via env
             elif platform == Platform.SMS and os.getenv("TWILIO_ACCOUNT_SID"):
+                connected.append(platform)
+            # Native 3DS gateway is transport-authenticated via token/host config.
+            elif platform == Platform.THREEDS:
                 connected.append(platform)
             # API Server uses enabled flag only (no token needed)
             elif platform == Platform.API_SERVER:
@@ -900,6 +904,28 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             chat_id=sms_home,
             name=os.getenv("SMS_HOME_CHANNEL_NAME", "Home"),
         )
+
+    # Native 3DS gateway
+    threeds_enabled = os.getenv("THREEDS_ENABLED", "").lower() in ("true", "1", "yes")
+    threeds_host = os.getenv("THREEDS_HOST")
+    threeds_port = os.getenv("THREEDS_PORT")
+    threeds_auth_token = os.getenv("THREEDS_AUTH_TOKEN", "")
+    threeds_device_id = os.getenv("THREEDS_DEVICE_ID", "")
+    if threeds_enabled or threeds_auth_token:
+        if Platform.THREEDS not in config.platforms:
+            config.platforms[Platform.THREEDS] = PlatformConfig()
+        config.platforms[Platform.THREEDS].enabled = True
+        if threeds_host:
+            config.platforms[Platform.THREEDS].extra["host"] = threeds_host
+        if threeds_port:
+            try:
+                config.platforms[Platform.THREEDS].extra["port"] = int(threeds_port)
+            except ValueError:
+                pass
+        if threeds_auth_token:
+            config.platforms[Platform.THREEDS].extra["auth_token"] = threeds_auth_token
+        if threeds_device_id:
+            config.platforms[Platform.THREEDS].extra["device_id"] = threeds_device_id
 
     # API Server
     api_server_enabled = os.getenv("API_SERVER_ENABLED", "").lower() in ("true", "1", "yes")

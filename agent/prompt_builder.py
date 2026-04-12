@@ -309,6 +309,12 @@ PLATFORM_HINTS = {
         "attachments, audio as file attachments. You can also include image URLs "
         "in markdown format ![alt](url) and they will be sent as attachments."
     ),
+    "3ds": (
+        "You are communicating with the user through a Nintendo 3DS homebrew client. "
+        "Keep responses compact, plain text, and easy to read on a tiny Old 3DS screen. "
+        "Do not rely on markdown rendering or rich formatting. Prefer short paragraphs, "
+        "minimal structure, and concise wording."
+    ),
     "slack": (
         "You are in a Slack workspace communicating with your user. "
         "You can send media files natively: include MEDIA:/absolute/path/to/file "
