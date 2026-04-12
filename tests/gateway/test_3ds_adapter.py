@@ -12,6 +12,7 @@ def _create_app(adapter):
     app = web.Application()
     app.router.add_get("/api/v2/health", adapter._handle_v2_health)
     app.router.add_get("/api/v2/capabilities", adapter._handle_capabilities)
+    app.router.add_get("/api/v2/conversations", adapter._handle_conversations)
     app.router.add_post("/api/v2/messages", adapter._handle_messages)
     app.router.add_post("/api/v2/voice", adapter._handle_voice)
     app.router.add_get("/api/v2/events", adapter._handle_events)
@@ -140,6 +141,103 @@ async def test_messages_ack_returns_cursor_and_events_return_reply_to():
         assert event_body["event"]["type"] == "message.created"
         assert event_body["event"]["text"] == "Hi from Hermes"
         assert event_body["event"]["reply_to"] == ack["message_id"]
+
+
+@pytest.mark.asyncio
+@patch("gateway.platforms.threeds.AIOHTTP_AVAILABLE", True)
+async def test_conversations_endpoint_lists_current_device_conversations_only(tmp_path):
+    from datetime import datetime, timedelta
+
+    from hermes_state import SessionDB
+    from gateway.platforms.threeds import ThreeDSAdapter
+    from gateway.session import SessionEntry, SessionSource, SessionStore
+
+    adapter = ThreeDSAdapter(PlatformConfig(enabled=True, extra={"auth_token": "***"}))
+    session_store = SessionStore(tmp_path / "sessions", GatewayConfig())
+    session_store._db = SessionDB(db_path=tmp_path / "state.db")
+    session_store._loaded = True
+
+    now = datetime.now()
+    session_store._entries = {
+        "agent:main:3ds:dm:3ds:old3ds:main": SessionEntry(
+            session_key="agent:main:3ds:dm:3ds:old3ds:main",
+            session_id="sid-main",
+            created_at=now - timedelta(minutes=5),
+            updated_at=now - timedelta(minutes=1),
+            origin=SessionSource(
+                platform=Platform.THREEDS,
+                chat_id="3ds:old3ds",
+                chat_name="3DS old3ds",
+                chat_type="dm",
+                user_id="old3ds",
+                user_name="old3ds",
+                thread_id="main",
+            ),
+            display_name="3DS old3ds",
+            platform=Platform.THREEDS,
+            chat_type="dm",
+        ),
+        "agent:main:3ds:dm:3ds:old3ds:focus": SessionEntry(
+            session_key="agent:main:3ds:dm:3ds:old3ds:focus",
+            session_id="sid-focus",
+            created_at=now - timedelta(minutes=20),
+            updated_at=now,
+            origin=SessionSource(
+                platform=Platform.THREEDS,
+                chat_id="3ds:old3ds",
+                chat_name="3DS old3ds",
+                chat_type="dm",
+                user_id="old3ds",
+                user_name="old3ds",
+                thread_id="focus",
+            ),
+            display_name="3DS old3ds",
+            platform=Platform.THREEDS,
+            chat_type="dm",
+        ),
+        "agent:main:3ds:dm:3ds:other3ds:main": SessionEntry(
+            session_key="agent:main:3ds:dm:3ds:other3ds:main",
+            session_id="sid-other",
+            created_at=now - timedelta(minutes=10),
+            updated_at=now - timedelta(minutes=2),
+            origin=SessionSource(
+                platform=Platform.THREEDS,
+                chat_id="3ds:other3ds",
+                chat_name="3DS other3ds",
+                chat_type="dm",
+                user_id="other3ds",
+                user_name="other3ds",
+                thread_id="main",
+            ),
+            display_name="3DS other3ds",
+            platform=Platform.THREEDS,
+            chat_type="dm",
+        ),
+    }
+
+    session_store._db.create_session("sid-main", "3ds", user_id="old3ds")
+    session_store._db.set_session_title("sid-main", "Main Chat")
+    session_store._db.append_message("sid-main", "user", "Main conversation prompt")
+    session_store._db.create_session("sid-focus", "3ds", user_id="old3ds")
+    session_store._db.append_message("sid-focus", "user", "Focus mode question")
+    session_store._db.create_session("sid-other", "3ds", user_id="other3ds")
+    session_store._db.set_session_title("sid-other", "Other Device")
+    session_store._db.append_message("sid-other", "user", "Should not leak")
+
+    adapter.gateway_runner = type("Runner", (), {"session_store": session_store, "_session_db": session_store._db})()
+    app = _create_app(adapter)
+
+    async with TestClient(TestServer(app)) as cli:
+        resp = await cli.get("/api/v2/conversations?token=***&device_id=old3ds")
+        assert resp.status == 200
+        body = await resp.json()
+
+    assert body["ok"] is True
+    assert body["count"] == 2
+    assert [item["conversation_id"] for item in body["conversations"]] == ["focus", "main"]
+    assert body["conversations"][0]["preview"] == "Focus mode question"
+    assert body["conversations"][1]["title"] == "Main Chat"
+    assert all(item["session_id"] != "sid-other" for item in body["conversations"])
 
 
 @pytest.mark.asyncio

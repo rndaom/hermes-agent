@@ -18,6 +18,7 @@ The 3DS client speaks a small V2 HTTP API:
 
 - `GET /api/v2/health`
 - `GET /api/v2/capabilities`
+- `GET /api/v2/conversations`
 - `POST /api/v2/messages`
 - `POST /api/v2/voice`
 - `GET /api/v2/events`
@@ -99,8 +100,12 @@ In the `hermes-agent-3ds` app on the 3DS, set:
 Then:
 
 - press `A` for a health check
-- press `B` to send a typed chat message
+- press `B` to send a typed chat message in the currently selected conversation
 - press `UP` to record mic input and send it through the host-side STT path
+- press `SELECT` to open the conversation picker
+  - `A` = activate a saved conversation slot
+  - `X` = create a new conversation ID on-device
+  - `Y` = sync recent conversation slots from Hermes
 
 For voice input, Hermes also needs an STT provider configured on the PC side. The easiest local option is `faster-whisper` in the Hermes venv.
 
@@ -109,6 +114,8 @@ For voice input, Hermes also needs an STT provider configured on the PC side. Th
 ## 3DS-specific behavior
 
 - **Session identity** is derived from the 3DS device ID and conversation ID
+- **Conversation picker parity**: the handheld now treats `conversation_id` like a gateway chat/thread slot, so switching slots resumes the corresponding Hermes session automatically
+- **Recent conversation sync** comes from `GET /api/v2/conversations`, while the 3DS keeps a tiny SD-backed cache of recent conversation IDs for offline-friendly selection
 - **Approvals** are delivered through the V2 interaction endpoint, so dangerous terminal commands can still be approved or denied from the handheld
 - **Long-poll events** let the 3DS wait for replies without needing WebSockets
 - **Allowlist checks are skipped for 3DS** — access control is the device token plus your LAN boundary

@@ -2124,7 +2124,9 @@ class GatewayRunner:
             if not check_threeds_requirements():
                 logger.warning("3DS: aiohttp not installed")
                 return None
-            return ThreeDSAdapter(config)
+            adapter = ThreeDSAdapter(config)
+            adapter.gateway_runner = self  # For conversation/session browsing
+            return adapter
         
         elif platform == Platform.WHATSAPP:
             from gateway.platforms.whatsapp import WhatsAppAdapter, check_whatsapp_requirements

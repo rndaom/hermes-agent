@@ -167,6 +167,7 @@ class ThreeDSAdapter(BasePlatformAdapter):
         app = web.Application()
         app.router.add_get("/api/v2/health", self._handle_v2_health)
         app.router.add_get("/api/v2/capabilities", self._handle_capabilities)
+        app.router.add_get("/api/v2/conversations", self._handle_conversations)
         app.router.add_post("/api/v2/messages", self._handle_messages)
         app.router.add_post("/api/v2/voice", self._handle_voice)
         app.router.add_get("/api/v2/events", self._handle_events)
@@ -234,6 +235,70 @@ class ThreeDSAdapter(BasePlatformAdapter):
             thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
         )
 
+    @staticmethod
+    def _compact_preview(text: str, limit: int = 60) -> str:
+        compact = " ".join((text or "").split())
+        if len(compact) <= limit:
+            return compact
+        return compact[:limit].rstrip() + "..."
+
+    def _preview_for_session(self, session_id: str) -> str:
+        runner = getattr(self, "gateway_runner", None)
+        if runner is None or getattr(runner, "session_store", None) is None:
+            return ""
+
+        try:
+            history = runner.session_store.load_transcript(session_id) or []
+        except Exception as exc:
+            logger.debug("[3DS] Failed to load transcript preview for %s: %s", session_id, exc)
+            return ""
+
+        for index in range(len(history), 0, -1):
+            message = history[index - 1]
+            if message.get("role") == "user" and message.get("content"):
+                return self._compact_preview(str(message.get("content", "")))
+        return ""
+
+    def _list_conversations(self, device_id: str, limit: int) -> list[dict[str, Any]]:
+        runner = getattr(self, "gateway_runner", None)
+        if runner is None or getattr(runner, "session_store", None) is None:
+            return []
+
+        session_db = getattr(runner, "_session_db", None)
+        expected_chat_id = f"3ds:{device_id}"
+        conversations: list[dict[str, Any]] = []
+
+        for entry in runner.session_store.list_sessions():
+            if entry.platform != Platform.THREEDS or entry.origin is None:
+                continue
+            if entry.origin.chat_id != expected_chat_id and entry.origin.user_id != device_id:
+                continue
+
+            conversation_id = (entry.origin.thread_id or "main").strip() or "main"
+            title = ""
+            if session_db is not None:
+                try:
+                    title = session_db.get_session_title(entry.session_id) or ""
+                except Exception as exc:
+                    logger.debug("[3DS] Failed to fetch title for %s: %s", entry.session_id, exc)
+
+            conversations.append(
+                {
+                    "conversation_id": conversation_id,
+                    "session_id": entry.session_id,
+                    "title": title,
+                    "preview": self._preview_for_session(entry.session_id),
+                    "updated_at": entry.updated_at.isoformat() if entry.updated_at else None,
+                    "_sort_ts": entry.updated_at.timestamp() if entry.updated_at else 0,
+                }
+            )
+
+        conversations.sort(key=lambda item: (item.get("_sort_ts") or 0, item.get("conversation_id") or ""), reverse=True)
+        trimmed = conversations[:limit]
+        for item in trimmed:
+            item.pop("_sort_ts", None)
+        return trimmed
+
     async def _enqueue_event(self, event: dict[str, Any]) -> int:
         async with self._event_condition:
             self._cursor += 1
@@ -278,6 +343,28 @@ class ThreeDSAdapter(BasePlatformAdapter):
                 "service": SERVICE_NAME,
                 "version": TRANSPORT_NAME,
                 "transport": TRANSPORT_NAME,
+            }
+        )
+
+    async def _handle_conversations(self, request: "web.Request") -> "web.Response":
+        if not self._is_authorized(request):
+            return web.json_response({"ok": False, "error": "Unauthorized."}, status=401)
+
+        device_id = request.query.get("device_id", "").strip() or self._default_device_id
+        if not device_id:
+            return web.json_response({"ok": False, "error": "device_id is required."}, status=400)
+
+        try:
+            requested_limit = int(request.query.get("limit", "8") or "8")
+        except ValueError:
+            requested_limit = 8
+        limit = max(1, min(requested_limit, 20))
+        conversations = self._list_conversations(device_id, limit)
+        return web.json_response(
+            {
+                "ok": True,
+                "count": len(conversations),
+                "conversations": conversations,
             }
         )
 
