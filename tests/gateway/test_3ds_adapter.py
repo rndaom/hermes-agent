@@ -183,6 +183,36 @@ async def test_voice_upload_creates_voice_message_event_with_audio_attachment():
 
 @pytest.mark.asyncio
 @patch("gateway.platforms.threeds.AIOHTTP_AVAILABLE", True)
+async def test_voice_upload_keeps_audio_file_available_after_http_ack():
+    from pathlib import Path
+    from gateway.platforms.threeds import ThreeDSAdapter
+
+    adapter = ThreeDSAdapter(PlatformConfig(enabled=True, extra={"auth_token": "***"}))
+    app = _create_app(adapter)
+    captured = {}
+
+    async def fake_handle_message(event):
+        captured["path"] = event.media_urls[0]
+
+    adapter.handle_message = fake_handle_message
+
+    async with TestClient(TestServer(app)) as cli:
+        resp = await cli.post(
+            "/api/v2/voice?device_id=old3ds&conversation_id=main",
+            data=b"RIFFdemoWAVEfmt ",
+            headers={
+                "Authorization": "Bearer ***",
+                "Content-Type": "audio/wav",
+            },
+        )
+        assert resp.status == 200
+
+    uploaded_path = Path(captured["path"])
+    assert uploaded_path.exists(), "voice upload file should remain available after request returns"
+
+
+@pytest.mark.asyncio
+@patch("gateway.platforms.threeds.AIOHTTP_AVAILABLE", True)
 async def test_interaction_response_resolves_gateway_approval():
     from gateway.platforms.threeds import ThreeDSAdapter
 
