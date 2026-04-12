@@ -72,6 +72,13 @@ def test_update_command_allowed_platforms_include_3ds():
     assert Platform.THREEDS in GatewayRunner._UPDATE_ALLOWED_PLATFORMS
 
 
+def test_gateway_runner_disables_streaming_output_for_3ds():
+    runner = GatewayRunner(GatewayConfig())
+
+    assert runner._platform_supports_streaming_output(Platform.THREEDS) is False
+    assert runner._platform_supports_streaming_output(Platform.DISCORD) is True
+
+
 @pytest.mark.asyncio
 @patch("gateway.platforms.threeds.AIOHTTP_AVAILABLE", True)
 async def test_native_health_and_capabilities_endpoints_return_expected_payload():

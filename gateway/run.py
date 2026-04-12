@@ -947,6 +947,17 @@ class GatewayRunner:
         route["request_overrides"] = overrides
         return route
 
+    @staticmethod
+    def _platform_supports_streaming_output(platform: "Platform") -> bool:
+        """Return whether a platform can safely consume streamed partial replies.
+
+        The native 3DS client expects one final assistant reply tied to the
+        current user message via ``reply_to``. Streaming partial chunks break
+        that contract because they arrive as multiple assistant events before
+        the final response is complete.
+        """
+        return platform != Platform.THREEDS
+
     async def _handle_adapter_fatal_error(self, adapter: BasePlatformAdapter) -> None:
         """React to an adapter failure after startup.
 
@@ -7668,8 +7679,9 @@ class GatewayRunner:
                 if _plat_streaming is None
                 else bool(_plat_streaming)
             )
-            _want_stream_deltas = _streaming_enabled
-            _want_interim_messages = interim_assistant_messages_enabled
+            _platform_streaming_supported = self._platform_supports_streaming_output(source.platform)
+            _want_stream_deltas = _streaming_enabled and _platform_streaming_supported
+            _want_interim_messages = interim_assistant_messages_enabled and _platform_streaming_supported
             _want_interim_consumer = _want_interim_messages
             if _want_stream_deltas or _want_interim_consumer:
                 try:
