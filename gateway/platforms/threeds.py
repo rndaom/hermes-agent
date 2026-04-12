@@ -15,7 +15,6 @@ import asyncio
 import logging
 import os
 import socket as _socket
-import tempfile
 import uuid
 from typing import Any, Dict, Optional
 
@@ -32,6 +31,7 @@ from gateway.platforms.base import (
     MessageEvent,
     MessageType,
     SendResult,
+    cache_audio_from_bytes,
     is_network_accessible,
 )
 from gateway.session import SessionSource, build_session_key
@@ -330,28 +330,17 @@ class ThreeDSAdapter(BasePlatformAdapter):
         ack_cursor = self._cursor
 
         suffix = ".wav" if "wav" in content_type else ".bin"
-        tmp_path = None
-        try:
-            with tempfile.NamedTemporaryFile(prefix="hermes-3ds-voice-", suffix=suffix, delete=False) as tmp:
-                tmp.write(audio_bytes)
-                tmp_path = tmp.name
-
-            event = MessageEvent(
-                text="",
-                message_type=MessageType.VOICE,
-                source=source,
-                message_id=message_id,
-                media_urls=[tmp_path],
-                media_types=[content_type],
-            )
-            await self.handle_message(event)
-            return web.json_response(self._message_ack_payload(source, conversation_id, message_id, ack_cursor))
-        finally:
-            if tmp_path:
-                try:
-                    os.remove(tmp_path)
-                except FileNotFoundError:
-                    pass
+        cached_path = cache_audio_from_bytes(audio_bytes, ext=suffix)
+        event = MessageEvent(
+            text="",
+            message_type=MessageType.VOICE,
+            source=source,
+            message_id=message_id,
+            media_urls=[cached_path],
+            media_types=[content_type],
+        )
+        await self.handle_message(event)
+        return web.json_response(self._message_ack_payload(source, conversation_id, message_id, ack_cursor))
 
     async def _handle_events(self, request: "web.Request") -> "web.Response":
         if not self._is_authorized(request):
