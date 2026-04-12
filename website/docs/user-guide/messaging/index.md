@@ -1,12 +1,12 @@
 ---
 sidebar_position: 1
 title: "Messaging Gateway"
-description: "Chat with Hermes from Telegram, Discord, Slack, WhatsApp, Signal, SMS, Email, Home Assistant, Mattermost, Matrix, DingTalk, Webhooks, or any OpenAI-compatible frontend via the API server — architecture and setup overview"
+description: "Chat with Hermes from Nintendo 3DS, Telegram, Discord, Slack, WhatsApp, Signal, SMS, Email, Home Assistant, Mattermost, Matrix, DingTalk, Webhooks, or any OpenAI-compatible frontend via the API server — architecture and setup overview"
 ---
 
 # Messaging Gateway
 
-Chat with Hermes from Telegram, Discord, Slack, WhatsApp, Signal, SMS, Email, Home Assistant, Mattermost, Matrix, DingTalk, Feishu/Lark, WeCom, Weixin, BlueBubbles (iMessage), or your browser. The gateway is a single background process that connects to all your configured platforms, handles sessions, runs cron jobs, and delivers voice messages.
+Chat with Hermes from a Nintendo 3DS, Telegram, Discord, Slack, WhatsApp, Signal, SMS, Email, Home Assistant, Mattermost, Matrix, DingTalk, Feishu/Lark, WeCom, Weixin, BlueBubbles (iMessage), or your browser. The gateway is a single background process that connects to all your configured platforms, handles sessions, runs cron jobs, and delivers voice messages.
 
 For the full voice feature set — including CLI microphone mode, spoken replies in messaging, and Discord voice-channel conversations — see [Voice Mode](/docs/user-guide/features/voice-mode) and [Use Voice Mode with Hermes](/docs/guides/use-voice-mode-with-hermes).
 
@@ -14,6 +14,7 @@ For the full voice feature set — including CLI microphone mode, spoken replies
 
 | Platform | Voice | Images | Files | Threads | Reactions | Typing | Streaming |
 |----------|:-----:|:------:|:-----:|:-------:|:---------:|:------:|:---------:|
+| Nintendo 3DS | — | — | — | — | — | — | — |
 | Telegram | ✅ | ✅ | ✅ | ✅ | — | ✅ | ✅ |
 | Discord | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Slack | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -38,6 +39,7 @@ For the full voice feature set — including CLI microphone mode, spoken replies
 flowchart TB
     subgraph Gateway["Hermes Gateway"]
         subgraph Adapters["Platform adapters"]
+            ds[3DS]
             tg[Telegram]
             dc[Discord]
             wa[WhatsApp]
@@ -62,6 +64,7 @@ flowchart TB
         cron["Cron scheduler<br/>ticks every 60s"]
     end
 
+    ds --> store
     tg --> store
     dc --> store
     wa --> store
@@ -94,6 +97,8 @@ hermes gateway setup        # Interactive setup for all messaging platforms
 ```
 
 This walks you through configuring each platform with arrow-key selection, shows which platforms are already configured, and offers to start/restart the gateway when done.
+
+For handheld setup details, see [Nintendo 3DS](/docs/user-guide/messaging/3ds).
 
 ## Gateway Commands
 

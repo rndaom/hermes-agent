@@ -383,6 +383,22 @@ class TestOptionalEnvVarsRegistry:
         from hermes_cli.config import OPTIONAL_ENV_VARS
         assert OPTIONAL_ENV_VARS["TAVILY_API_KEY"]["url"] == "https://app.tavily.com/home"
 
+    def test_threeds_gateway_vars_registered(self):
+        """3DS gateway env vars are exposed through OPTIONAL_ENV_VARS for setup/config UX."""
+        from hermes_cli.config import OPTIONAL_ENV_VARS
+
+        for key in [
+            "THREEDS_ENABLED",
+            "THREEDS_HOST",
+            "THREEDS_PORT",
+            "THREEDS_AUTH_TOKEN",
+            "THREEDS_DEVICE_ID",
+        ]:
+            assert key in OPTIONAL_ENV_VARS
+            assert OPTIONAL_ENV_VARS[key]["category"] == "messaging"
+
+        assert OPTIONAL_ENV_VARS["THREEDS_AUTH_TOKEN"]["password"] is True
+
     def test_tavily_in_env_vars_by_version(self):
         """TAVILY_API_KEY is listed in ENV_VARS_BY_VERSION."""
         from hermes_cli.config import ENV_VARS_BY_VERSION

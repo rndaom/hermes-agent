@@ -95,6 +95,7 @@ const sidebars: SidebarsConfig = {
       collapsed: true,
       items: [
         'user-guide/messaging/index',
+        'user-guide/messaging/3ds',
         'user-guide/messaging/telegram',
         'user-guide/messaging/discord',
         'user-guide/messaging/slack',
