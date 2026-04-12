@@ -289,6 +289,11 @@ For cloud sandbox backends, persistence is filesystem-oriented. `TERMINAL_LIFETI
 | `API_SERVER_PORT` | Port for the API server (default: `8642`) |
 | `API_SERVER_HOST` | Host/bind address for the API server (default: `127.0.0.1`). Use `0.0.0.0` for network access — requires `API_SERVER_KEY` and a narrow `API_SERVER_CORS_ORIGINS` allowlist. |
 | `API_SERVER_MODEL_NAME` | Model name advertised on `/v1/models`. Defaults to the profile name (or `hermes-agent` for the default profile). Useful for multi-user setups where frontends like Open WebUI need distinct model names per connection. |
+| `THREEDS_ENABLED` | Enable the native Nintendo 3DS gateway adapter (`true`/`false`) |
+| `THREEDS_HOST` | Host/bind address for the 3DS gateway (default: `127.0.0.1`) |
+| `THREEDS_PORT` | Port for the 3DS gateway HTTP server (default: `8787`) |
+| `THREEDS_AUTH_TOKEN` | Token required by the 3DS client for authenticated access |
+| `THREEDS_DEVICE_ID` | Default 3DS device ID when the handheld omits one |
 | `MESSAGING_CWD` | Working directory for terminal commands in messaging mode (default: `~`) |
 | `GATEWAY_ALLOWED_USERS` | Comma-separated user IDs allowed across all platforms |
 | `GATEWAY_ALLOW_ALL_USERS` | Allow all users without allowlists (`true`/`false`, default: `false`) |
