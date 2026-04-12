@@ -13,6 +13,7 @@ def _create_app(adapter):
     app.router.add_get("/api/v2/health", adapter._handle_v2_health)
     app.router.add_get("/api/v2/capabilities", adapter._handle_capabilities)
     app.router.add_post("/api/v2/messages", adapter._handle_messages)
+    app.router.add_post("/api/v2/voice", adapter._handle_voice)
     app.router.add_get("/api/v2/events", adapter._handle_events)
     app.router.add_post("/api/v2/interactions/{request_id}/respond", adapter._handle_interaction_response)
     return app
@@ -139,6 +140,45 @@ async def test_messages_ack_returns_cursor_and_events_return_reply_to():
         assert event_body["event"]["type"] == "message.created"
         assert event_body["event"]["text"] == "Hi from Hermes"
         assert event_body["event"]["reply_to"] == ack["message_id"]
+
+
+@pytest.mark.asyncio
+@patch("gateway.platforms.threeds.AIOHTTP_AVAILABLE", True)
+async def test_voice_upload_creates_voice_message_event_with_audio_attachment():
+    from gateway.platforms.threeds import ThreeDSAdapter
+    from gateway.platforms.base import MessageType
+
+    adapter = ThreeDSAdapter(PlatformConfig(enabled=True, extra={"auth_token": "***"}))
+    app = _create_app(adapter)
+    captured = {}
+
+    async def fake_handle_message(event):
+        captured["event"] = event
+
+    adapter.handle_message = fake_handle_message
+
+    async with TestClient(TestServer(app)) as cli:
+        resp = await cli.post(
+            "/api/v2/voice?device_id=old3ds&conversation_id=main",
+            data=b"RIFFdemoWAVEfmt ",
+            headers={
+                "Authorization": "Bearer ***",
+                "Content-Type": "audio/wav",
+            },
+        )
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["ok"] is True
+        assert body["chat_id"] == "3ds:old3ds"
+        assert body["conversation_id"] == "main"
+        assert "message_id" in body
+        assert "cursor" in body
+
+    event = captured["event"]
+    assert event.message_type == MessageType.VOICE
+    assert event.media_urls
+    assert event.media_types == ["audio/wav"]
+    assert event.source.chat_id == "3ds:old3ds"
 
 
 @pytest.mark.asyncio
