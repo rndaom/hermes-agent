@@ -19,6 +19,7 @@ The 3DS client speaks a small V2 HTTP API:
 - `GET /api/v2/health`
 - `GET /api/v2/capabilities`
 - `POST /api/v2/messages`
+- `POST /api/v2/voice`
 - `GET /api/v2/events`
 - `POST /api/v2/interactions/{request_id}/respond`
 
@@ -98,7 +99,10 @@ In the `hermes-agent-3ds` app on the 3DS, set:
 Then:
 
 - press `A` for a health check
-- press `B` to send a chat message
+- press `B` to send a typed chat message
+- press `UP` to record mic input and send it through the host-side STT path
+
+For voice input, Hermes also needs an STT provider configured on the PC side. The easiest local option is `faster-whisper` in the Hermes venv.
 
 ---
 
@@ -131,6 +135,17 @@ Choose another port with `THREEDS_PORT` or `platforms.3ds.extra.port`.
 ### Replies never arrive
 
 Check that the client and gateway agree on the same `device_id` and `conversation_id`, and confirm the gateway logs show the incoming request.
+
+### Voice upload works but Hermes says it cannot transcribe
+
+That usually means the handheld reached `POST /api/v2/voice`, but Hermes has no usable STT backend.
+
+Good checks:
+
+1. confirm `stt.enabled: true` in `config.yaml`
+2. if using local STT, install `faster-whisper` in the Hermes venv
+3. restart the gateway after installing STT dependencies
+4. retry the mic upload from the 3DS
 
 ---
 
