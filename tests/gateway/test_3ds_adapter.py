@@ -16,7 +16,10 @@ def _create_app(adapter):
     app.router.add_post("/api/v2/messages", adapter._handle_messages)
     app.router.add_post("/api/v2/voice", adapter._handle_voice)
     app.router.add_get("/api/v2/events", adapter._handle_events)
-    app.router.add_post("/api/v2/interactions/{request_id}/respond", adapter._handle_interaction_response)
+    app.router.add_post(
+        "/api/v2/interactions/{request_id}/respond",
+        adapter._handle_interaction_response,
+    )
     return app
 
 
@@ -116,7 +119,9 @@ async def test_native_health_and_capabilities_endpoints_return_expected_payload(
 @pytest.mark.asyncio
 @patch("gateway.platforms.threeds.AIOHTTP_AVAILABLE", True)
 @patch("gateway.platforms.threeds.get_model_context_length", return_value=128000)
-async def test_health_endpoint_returns_live_session_model_and_context_telemetry(_mock_ctx_len, tmp_path):
+async def test_health_endpoint_returns_live_session_model_and_context_telemetry(
+    _mock_ctx_len, tmp_path
+):
     from gateway.platforms.threeds import ThreeDSAdapter
 
     adapter = ThreeDSAdapter(PlatformConfig(enabled=True, extra={"auth_token": "***"}))
@@ -136,7 +141,9 @@ async def test_health_endpoint_returns_live_session_model_and_context_telemetry(
     app = _create_app(adapter)
 
     async with TestClient(TestServer(app)) as cli:
-        resp = await cli.get("/api/v2/health?token=***&device_id=old3ds&conversation_id=main")
+        resp = await cli.get(
+            "/api/v2/health?token=***&device_id=old3ds&conversation_id=main"
+        )
         assert resp.status == 200
         body = await resp.json()
         assert body["model_name"] == "gpt-5.4"
@@ -148,7 +155,9 @@ async def test_health_endpoint_returns_live_session_model_and_context_telemetry(
 @pytest.mark.asyncio
 @patch("gateway.platforms.threeds.AIOHTTP_AVAILABLE", True)
 @patch("gateway.platforms.threeds.get_model_context_length", return_value=200000)
-async def test_health_endpoint_uses_session_override_and_stored_prompt_tokens_when_no_live_agent(_mock_ctx_len, tmp_path):
+async def test_health_endpoint_uses_session_override_and_stored_prompt_tokens_when_no_live_agent(
+    _mock_ctx_len, tmp_path
+):
     from datetime import datetime
 
     from gateway.platforms.threeds import ThreeDSAdapter
@@ -193,7 +202,9 @@ async def test_health_endpoint_uses_session_override_and_stored_prompt_tokens_wh
     app = _create_app(adapter)
 
     async with TestClient(TestServer(app)) as cli:
-        resp = await cli.get("/api/v2/health?token=***&device_id=old3ds&conversation_id=focus")
+        resp = await cli.get(
+            "/api/v2/health?token=***&device_id=old3ds&conversation_id=focus"
+        )
         assert resp.status == 200
         body = await resp.json()
         assert body["model_name"] == "gpt-5.4-mini"
@@ -205,16 +216,22 @@ async def test_health_endpoint_uses_session_override_and_stored_prompt_tokens_wh
 @pytest.mark.asyncio
 @patch("gateway.platforms.threeds.AIOHTTP_AVAILABLE", True)
 @patch("gateway.platforms.threeds.get_model_context_length", return_value=128000)
-async def test_health_endpoint_returns_empty_telemetry_for_unknown_session(_mock_ctx_len):
+async def test_health_endpoint_returns_empty_telemetry_for_unknown_session(
+    _mock_ctx_len,
+):
     from gateway.platforms.threeds import ThreeDSAdapter
 
-    adapter = ThreeDSAdapter(PlatformConfig(enabled=True, extra={"auth_token": "tok", "device_id": "old3ds"}))
+    adapter = ThreeDSAdapter(
+        PlatformConfig(enabled=True, extra={"auth_token": "tok", "device_id": "old3ds"})
+    )
     runner = GatewayRunner(GatewayConfig())
     adapter.gateway_runner = runner
     app = _create_app(adapter)
 
     async with TestClient(TestServer(app)) as cli:
-        resp = await cli.get("/api/v2/health?token=tok&device_id=ghost3ds&conversation_id=missing")
+        resp = await cli.get(
+            "/api/v2/health?token=tok&device_id=ghost3ds&conversation_id=missing"
+        )
         assert resp.status == 200
         body = await resp.json()
         assert body["model_name"] == ""
@@ -246,7 +263,9 @@ async def test_capabilities_endpoint_returns_session_scoped_telemetry(_mock_ctx_
     app = _create_app(adapter)
 
     async with TestClient(TestServer(app)) as cli:
-        resp = await cli.get("/api/v2/capabilities?token=tok&device_id=old3ds&conversation_id=main")
+        resp = await cli.get(
+            "/api/v2/capabilities?token=tok&device_id=old3ds&conversation_id=main"
+        )
         assert resp.status == 200
         body = await resp.json()
         assert body["model_name"] == "gpt-5.4"
@@ -311,6 +330,61 @@ async def test_messages_ack_returns_cursor_and_events_return_reply_to():
         assert event_body["event"]["type"] == "message.created"
         assert event_body["event"]["text"] == "Hi from Hermes"
         assert event_body["event"]["reply_to"] == ack["message_id"]
+
+
+@pytest.mark.asyncio
+@patch("gateway.platforms.threeds.AIOHTTP_AVAILABLE", True)
+async def test_partial_updates_emit_message_updated_before_final_created():
+    from gateway.platforms.threeds import ThreeDSAdapter
+
+    adapter = ThreeDSAdapter(PlatformConfig(enabled=True, extra={"auth_token": "tok"}))
+    app = _create_app(adapter)
+
+    async with TestClient(TestServer(app)) as cli:
+        resp = await cli.post(
+            "/api/v2/messages",
+            json={
+                "token": "tok",
+                "device_id": "old3ds",
+                "conversation_id": "main",
+                "text": "hello",
+            },
+        )
+        ack = await resp.json()
+
+        partial = await adapter.send_partial(
+            chat_id="3ds:old3ds",
+            content="Hi from",
+            reply_to=ack["message_id"],
+            metadata={"thread_id": "main"},
+        )
+        final = await adapter.send(
+            chat_id="3ds:old3ds",
+            content="Hi from Hermes",
+            reply_to=ack["message_id"],
+            metadata={"thread_id": "main"},
+        )
+
+        assert partial.success is True
+        assert final.success is True
+        assert partial.message_id == final.message_id
+
+        resp = await cli.get(
+            f"/api/v2/events?token=tok&device_id=old3ds&conversation_id=main&cursor={ack['cursor']}&wait=1"
+        )
+        partial_body = await resp.json()
+        assert partial_body["event"]["type"] == "message.updated"
+        assert partial_body["event"]["text"] == "Hi from"
+        assert partial_body["event"]["reply_to"] == ack["message_id"]
+
+        resp = await cli.get(
+            f"/api/v2/events?token=tok&device_id=old3ds&conversation_id=main&cursor={partial_body['cursor']}&wait=1"
+        )
+        final_body = await resp.json()
+        assert final_body["event"]["type"] == "message.created"
+        assert final_body["event"]["text"] == "Hi from Hermes"
+        assert final_body["event"]["reply_to"] == ack["message_id"]
+        assert final_body["event"]["message_id"] == partial.message_id
 
 
 @pytest.mark.asyncio
@@ -394,7 +468,9 @@ async def test_conversations_endpoint_lists_current_device_conversations_only(tm
     session_store._db.set_session_title("sid-other", "Other Device")
     session_store._db.append_message("sid-other", "user", "Should not leak")
 
-    adapter.gateway_runner = type("Runner", (), {"session_store": session_store, "_session_db": session_store._db})()
+    adapter.gateway_runner = type(
+        "Runner", (), {"session_store": session_store, "_session_db": session_store._db}
+    )()
     app = _create_app(adapter)
 
     async with TestClient(TestServer(app)) as cli:
@@ -404,7 +480,10 @@ async def test_conversations_endpoint_lists_current_device_conversations_only(tm
 
     assert body["ok"] is True
     assert body["count"] == 2
-    assert [item["conversation_id"] for item in body["conversations"]] == ["focus", "main"]
+    assert [item["conversation_id"] for item in body["conversations"]] == [
+        "focus",
+        "main",
+    ]
     assert body["conversations"][0]["preview"] == "Focus mode question"
     assert body["conversations"][1]["title"] == "Main Chat"
     assert all(item["session_id"] != "sid-other" for item in body["conversations"])
@@ -476,7 +555,9 @@ async def test_voice_upload_keeps_audio_file_available_after_http_ack():
         assert resp.status == 200
 
     uploaded_path = Path(captured["path"])
-    assert uploaded_path.exists(), "voice upload file should remain available after request returns"
+    assert uploaded_path.exists(), (
+        "voice upload file should remain available after request returns"
+    )
 
 
 @pytest.mark.asyncio
@@ -496,7 +577,9 @@ async def test_interaction_response_resolves_gateway_approval():
     app = _create_app(adapter)
 
     async with TestClient(TestServer(app)) as cli:
-        with patch("gateway.platforms.threeds.resolve_gateway_approval", return_value=1) as mock_resolve:
+        with patch(
+            "gateway.platforms.threeds.resolve_gateway_approval", return_value=1
+        ) as mock_resolve:
             resp = await cli.post(
                 f"/api/v2/interactions/{request_id}/respond?token=tok",
                 json={"choice": "session"},
@@ -506,4 +589,6 @@ async def test_interaction_response_resolves_gateway_approval():
             assert body["ok"] is True
             assert body["request_id"] == request_id
             assert body["choice"] == "session"
-            mock_resolve.assert_called_once_with("agent:main:3ds:dm:3ds:old3ds:main", "session")
+            mock_resolve.assert_called_once_with(
+                "agent:main:3ds:dm:3ds:old3ds:main", "session"
+            )

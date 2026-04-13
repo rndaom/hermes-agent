@@ -14,12 +14,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import queue
 import socket as _socket
+import time
 import uuid
 from typing import Any, Dict, Optional
 
 try:
     from aiohttp import web
+
     AIOHTTP_AVAILABLE = True
 except ImportError:
     AIOHTTP_AVAILABLE = False
@@ -45,6 +48,95 @@ DEFAULT_PORT = 8787
 EVENT_QUEUE_LIMIT = 1000
 SERVICE_NAME = "hermes-3ds-gateway"
 TRANSPORT_NAME = "http-long-poll"
+_STREAM_DONE = object()
+
+
+class ThreeDSStreamConsumer:
+    """Emit throttled `message.updated` events while Hermes is generating."""
+
+    def __init__(
+        self,
+        adapter: "ThreeDSAdapter",
+        chat_id: str,
+        reply_to: str,
+        *,
+        edit_interval: float,
+        buffer_threshold: int,
+        metadata: Optional[dict[str, Any]] = None,
+    ):
+        self.adapter = adapter
+        self.chat_id = chat_id
+        self.reply_to = reply_to
+        self.edit_interval = edit_interval
+        self.buffer_threshold = buffer_threshold
+        self.metadata = metadata
+        self._queue: queue.Queue = queue.Queue()
+        self._accumulated = ""
+        self._last_sent_text = ""
+        self._last_emit = 0.0
+        self._already_sent = False
+        self._final_response_sent = False
+
+    @property
+    def already_sent(self) -> bool:
+        return self._already_sent
+
+    @property
+    def final_response_sent(self) -> bool:
+        return self._final_response_sent
+
+    def on_delta(self, text: Optional[str]) -> None:
+        if text:
+            self._queue.put(text)
+
+    def on_segment_break(self) -> None:
+        return
+
+    def on_commentary(self, text: str) -> None:
+        return
+
+    def finish(self) -> None:
+        self._queue.put(_STREAM_DONE)
+
+    async def _flush_partial(self) -> None:
+        if not self._accumulated or self._accumulated == self._last_sent_text:
+            return
+        result = await self.adapter.send_partial(
+            chat_id=self.chat_id,
+            content=self._accumulated,
+            reply_to=self.reply_to,
+            metadata=self.metadata,
+        )
+        if result.success:
+            self._already_sent = True
+            self._last_sent_text = self._accumulated
+            self._last_emit = time.monotonic()
+
+    async def run(self) -> None:
+        while True:
+            got_done = False
+            while True:
+                try:
+                    item = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+                if item is _STREAM_DONE:
+                    got_done = True
+                    break
+                self._accumulated += str(item)
+
+            delta_size = len(self._accumulated) - len(self._last_sent_text)
+            elapsed = time.monotonic() - self._last_emit
+            should_flush = got_done or (
+                delta_size >= self.buffer_threshold
+                or (delta_size > 0 and elapsed >= self.edit_interval)
+            )
+
+            if should_flush:
+                await self._flush_partial()
+            if got_done:
+                return
+            await asyncio.sleep(0.05)
 
 
 def check_threeds_requirements() -> bool:
@@ -58,10 +150,18 @@ class ThreeDSAdapter(BasePlatformAdapter):
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.THREEDS)
         extra = config.extra or {}
-        self._host: str = str(extra.get("host", os.getenv("THREEDS_HOST", DEFAULT_HOST)))
-        self._port: int = int(extra.get("port", os.getenv("THREEDS_PORT", str(DEFAULT_PORT))))
-        self._auth_token: str = str(extra.get("auth_token", os.getenv("THREEDS_AUTH_TOKEN", "")))
-        self._default_device_id: str = str(extra.get("device_id", os.getenv("THREEDS_DEVICE_ID", "")))
+        self._host: str = str(
+            extra.get("host", os.getenv("THREEDS_HOST", DEFAULT_HOST))
+        )
+        self._port: int = int(
+            extra.get("port", os.getenv("THREEDS_PORT", str(DEFAULT_PORT)))
+        )
+        self._auth_token: str = str(
+            extra.get("auth_token", os.getenv("THREEDS_AUTH_TOKEN", ""))
+        )
+        self._default_device_id: str = str(
+            extra.get("device_id", os.getenv("THREEDS_DEVICE_ID", ""))
+        )
         self._runner: Optional[web.AppRunner] = None if AIOHTTP_AVAILABLE else None
         self._site = None
         self._app: Optional[web.Application] = None if AIOHTTP_AVAILABLE else None
@@ -69,6 +169,7 @@ class ThreeDSAdapter(BasePlatformAdapter):
         self._cursor: int = 0
         self._event_condition = asyncio.Condition()
         self._pending_interactions: dict[str, dict[str, Any]] = {}
+        self._pending_stream_message_ids: dict[str, str] = {}
 
     async def connect(self) -> bool:
         if not AIOHTTP_AVAILABLE:
@@ -78,7 +179,10 @@ class ThreeDSAdapter(BasePlatformAdapter):
             with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as sock:
                 sock.settimeout(1)
                 sock.connect(("127.0.0.1", self._port))
-            logger.error("[3DS] Port %d already in use. Set platforms.3ds.extra.port in config.yaml", self._port)
+            logger.error(
+                "[3DS] Port %d already in use. Set platforms.3ds.extra.port in config.yaml",
+                self._port,
+            )
             return False
         except (ConnectionRefusedError, OSError):
             pass
@@ -116,7 +220,11 @@ class ThreeDSAdapter(BasePlatformAdapter):
     ) -> SendResult:
         device_id = self._device_id_from_chat_id(chat_id)
         conversation_id = self._conversation_id_from_metadata(metadata)
-        message_id = f"assistant-{uuid.uuid4().hex[:12]}"
+        stream_key = self._stream_key(device_id, conversation_id, reply_to)
+        message_id = (
+            self._pending_stream_message_ids.pop(stream_key, None)
+            or f"assistant-{uuid.uuid4().hex[:12]}"
+        )
         event = {
             "device_id": device_id,
             "conversation_id": conversation_id,
@@ -127,6 +235,54 @@ class ThreeDSAdapter(BasePlatformAdapter):
             "reply_to": reply_to or "",
         }
         await self._enqueue_event(event)
+        return SendResult(success=True, message_id=message_id)
+
+    def _stream_key(
+        self, device_id: str, conversation_id: str, reply_to: Optional[str]
+    ) -> str:
+        return f"{device_id}:{conversation_id}:{reply_to or ''}"
+
+    def _stream_message_id(
+        self, device_id: str, conversation_id: str, reply_to: str
+    ) -> str:
+        stream_key = self._stream_key(device_id, conversation_id, reply_to)
+        message_id = self._pending_stream_message_ids.get(stream_key)
+        if message_id is None:
+            message_id = f"assistant-{uuid.uuid4().hex[:12]}"
+            self._pending_stream_message_ids[stream_key] = message_id
+            if len(self._pending_stream_message_ids) > EVENT_QUEUE_LIMIT:
+                self._pending_stream_message_ids.pop(
+                    next(iter(self._pending_stream_message_ids))
+                )
+        return message_id
+
+    async def send_partial(
+        self,
+        chat_id: str,
+        content: str,
+        reply_to: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        device_id = self._device_id_from_chat_id(chat_id)
+        conversation_id = self._conversation_id_from_metadata(metadata)
+
+        if not reply_to:
+            return SendResult(
+                success=False, error="reply_to is required for partial 3DS updates"
+            )
+
+        message_id = self._stream_message_id(device_id, conversation_id, reply_to)
+        await self._enqueue_event(
+            {
+                "device_id": device_id,
+                "conversation_id": conversation_id,
+                "session_key": self._session_key(device_id, conversation_id),
+                "type": "message.updated",
+                "message_id": message_id,
+                "text": content,
+                "reply_to": reply_to,
+            }
+        )
         return SendResult(success=True, message_id=message_id)
 
     async def send_exec_approval(
@@ -172,10 +328,15 @@ class ThreeDSAdapter(BasePlatformAdapter):
         app.router.add_post("/api/v2/messages", self._handle_messages)
         app.router.add_post("/api/v2/voice", self._handle_voice)
         app.router.add_get("/api/v2/events", self._handle_events)
-        app.router.add_post("/api/v2/interactions/{request_id}/respond", self._handle_interaction_response)
+        app.router.add_post(
+            "/api/v2/interactions/{request_id}/respond",
+            self._handle_interaction_response,
+        )
         return app
 
-    def _message_ack_payload(self, source: SessionSource, conversation_id: str, message_id: str, cursor: int) -> dict[str, Any]:
+    def _message_ack_payload(
+        self, source: SessionSource, conversation_id: str, message_id: str, cursor: int
+    ) -> dict[str, Any]:
         return {
             "ok": True,
             "chat_id": source.chat_id,
@@ -184,7 +345,9 @@ class ThreeDSAdapter(BasePlatformAdapter):
             "cursor": cursor,
         }
 
-    def _health_payload(self, device_id: str = "", conversation_id: str = "main") -> dict[str, Any]:
+    def _health_payload(
+        self, device_id: str = "", conversation_id: str = "main"
+    ) -> dict[str, Any]:
         return {
             "ok": True,
             "platform": "3ds",
@@ -195,7 +358,9 @@ class ThreeDSAdapter(BasePlatformAdapter):
 
     def _session_entry_for(self, device_id: str, conversation_id: str):
         runner = getattr(self, "gateway_runner", None)
-        session_store = getattr(runner, "session_store", None) if runner is not None else None
+        session_store = (
+            getattr(runner, "session_store", None) if runner is not None else None
+        )
         session_key = self._session_key(device_id, conversation_id)
         if session_store is None:
             return session_key, None
@@ -232,7 +397,9 @@ class ThreeDSAdapter(BasePlatformAdapter):
             return cached
         return None
 
-    def _telemetry_payload(self, device_id: str = "", conversation_id: str = "main") -> dict[str, Any]:
+    def _telemetry_payload(
+        self, device_id: str = "", conversation_id: str = "main"
+    ) -> dict[str, Any]:
         resolved_device_id = (device_id or "").strip()
         resolved_conversation_id = (conversation_id or "main").strip() or "main"
         model_name = ""
@@ -250,7 +417,9 @@ class ThreeDSAdapter(BasePlatformAdapter):
             }
 
         runner = getattr(self, "gateway_runner", None)
-        session_key, session_entry = self._session_entry_for(resolved_device_id, resolved_conversation_id)
+        session_key, session_entry = self._session_entry_for(
+            resolved_device_id, resolved_conversation_id
+        )
         agent = self._cached_or_running_agent_for(session_key)
         if agent is None and session_entry is None:
             return {
@@ -268,7 +437,11 @@ class ThreeDSAdapter(BasePlatformAdapter):
                     session_key=session_key,
                 )
             except Exception as exc:
-                logger.debug("[3DS] Failed to resolve session runtime for %s: %s", session_key, exc)
+                logger.debug(
+                    "[3DS] Failed to resolve session runtime for %s: %s",
+                    session_key,
+                    exc,
+                )
                 model_name = ""
                 runtime_kwargs = {}
 
@@ -276,8 +449,12 @@ class ThreeDSAdapter(BasePlatformAdapter):
             model_name = getattr(agent, "model", model_name) or model_name
             context_compressor = getattr(agent, "context_compressor", None)
             if context_compressor is not None:
-                context_length = int(getattr(context_compressor, "context_length", 0) or 0)
-                context_tokens = int(getattr(context_compressor, "last_prompt_tokens", 0) or 0)
+                context_length = int(
+                    getattr(context_compressor, "context_length", 0) or 0
+                )
+                context_tokens = int(
+                    getattr(context_compressor, "last_prompt_tokens", 0) or 0
+                )
 
         if context_tokens == 0 and session_entry is not None:
             context_tokens = int(getattr(session_entry, "last_prompt_tokens", 0) or 0)
@@ -290,14 +467,19 @@ class ThreeDSAdapter(BasePlatformAdapter):
                         base_url=(runtime_kwargs.get("base_url") or ""),
                         api_key=(runtime_kwargs.get("api_key") or ""),
                         provider=(runtime_kwargs.get("provider") or ""),
-                    ) or 0
+                    )
+                    or 0
                 )
             except Exception as exc:
-                logger.debug("[3DS] Failed to resolve context length for %s: %s", model_name, exc)
+                logger.debug(
+                    "[3DS] Failed to resolve context length for %s: %s", model_name, exc
+                )
                 context_length = 0
 
         if context_length > 0 and context_tokens > 0:
-            context_percent = max(0, min(100, round((context_tokens / context_length) * 100)))
+            context_percent = max(
+                0, min(100, round((context_tokens / context_length) * 100))
+            )
         elif context_length > 0:
             context_percent = 0
 
@@ -308,7 +490,9 @@ class ThreeDSAdapter(BasePlatformAdapter):
             "context_percent": context_percent,
         }
 
-    def _extract_token(self, request: "web.Request", payload: Optional[dict[str, Any]] = None) -> str:
+    def _extract_token(
+        self, request: "web.Request", payload: Optional[dict[str, Any]] = None
+    ) -> str:
         auth_header = request.headers.get("Authorization", "")
         if auth_header.lower().startswith("bearer "):
             return auth_header[7:].strip()
@@ -319,7 +503,9 @@ class ThreeDSAdapter(BasePlatformAdapter):
             return payload.get("token", "").strip()
         return ""
 
-    def _is_authorized(self, request: "web.Request", payload: Optional[dict[str, Any]] = None) -> bool:
+    def _is_authorized(
+        self, request: "web.Request", payload: Optional[dict[str, Any]] = None
+    ) -> bool:
         if not self._auth_token:
             return True
         return self._extract_token(request, payload) == self._auth_token
@@ -348,8 +534,12 @@ class ThreeDSAdapter(BasePlatformAdapter):
     def _session_key(self, device_id: str, conversation_id: str) -> str:
         return build_session_key(
             self._session_source(device_id, conversation_id),
-            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
-            thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
+            group_sessions_per_user=self.config.extra.get(
+                "group_sessions_per_user", True
+            ),
+            thread_sessions_per_user=self.config.extra.get(
+                "thread_sessions_per_user", False
+            ),
         )
 
     @staticmethod
@@ -367,7 +557,9 @@ class ThreeDSAdapter(BasePlatformAdapter):
         try:
             history = runner.session_store.load_transcript(session_id) or []
         except Exception as exc:
-            logger.debug("[3DS] Failed to load transcript preview for %s: %s", session_id, exc)
+            logger.debug(
+                "[3DS] Failed to load transcript preview for %s: %s", session_id, exc
+            )
             return ""
 
         for index in range(len(history), 0, -1):
@@ -388,7 +580,10 @@ class ThreeDSAdapter(BasePlatformAdapter):
         for entry in runner.session_store.list_sessions():
             if entry.platform != Platform.THREEDS or entry.origin is None:
                 continue
-            if entry.origin.chat_id != expected_chat_id and entry.origin.user_id != device_id:
+            if (
+                entry.origin.chat_id != expected_chat_id
+                and entry.origin.user_id != device_id
+            ):
                 continue
 
             conversation_id = (entry.origin.thread_id or "main").strip() or "main"
@@ -397,7 +592,9 @@ class ThreeDSAdapter(BasePlatformAdapter):
                 try:
                     title = session_db.get_session_title(entry.session_id) or ""
                 except Exception as exc:
-                    logger.debug("[3DS] Failed to fetch title for %s: %s", entry.session_id, exc)
+                    logger.debug(
+                        "[3DS] Failed to fetch title for %s: %s", entry.session_id, exc
+                    )
 
             conversations.append(
                 {
@@ -405,12 +602,20 @@ class ThreeDSAdapter(BasePlatformAdapter):
                     "session_id": entry.session_id,
                     "title": title,
                     "preview": self._preview_for_session(entry.session_id),
-                    "updated_at": entry.updated_at.isoformat() if entry.updated_at else None,
+                    "updated_at": entry.updated_at.isoformat()
+                    if entry.updated_at
+                    else None,
                     "_sort_ts": entry.updated_at.timestamp() if entry.updated_at else 0,
                 }
             )
 
-        conversations.sort(key=lambda item: (item.get("_sort_ts") or 0, item.get("conversation_id") or ""), reverse=True)
+        conversations.sort(
+            key=lambda item: (
+                item.get("_sort_ts") or 0,
+                item.get("conversation_id") or "",
+            ),
+            reverse=True,
+        )
         trimmed = conversations[:limit]
         for item in trimmed:
             item.pop("_sort_ts", None)
@@ -434,7 +639,8 @@ class ThreeDSAdapter(BasePlatformAdapter):
         conversation_id: str,
     ) -> tuple[Optional[dict[str, Any]], int]:
         matching = [
-            event for event in self._events
+            event
+            for event in self._events
             if event["cursor"] > after_cursor
             and event.get("device_id") == device_id
             and event.get("conversation_id") == conversation_id
@@ -452,7 +658,9 @@ class ThreeDSAdapter(BasePlatformAdapter):
         raw_conversation_id = request.query.get("conversation_id", "").strip()
         telemetry_requested = bool(raw_device_id or raw_conversation_id)
         if telemetry_requested and not self._is_authorized(request):
-            return web.json_response({"ok": False, "error": "Unauthorized."}, status=401)
+            return web.json_response(
+                {"ok": False, "error": "Unauthorized."}, status=401
+            )
         if not telemetry_requested:
             return web.json_response(self._health_payload("", "main"))
         device_id = raw_device_id or self._default_device_id
@@ -461,8 +669,12 @@ class ThreeDSAdapter(BasePlatformAdapter):
 
     async def _handle_capabilities(self, request: "web.Request") -> "web.Response":
         if not self._is_authorized(request):
-            return web.json_response({"ok": False, "error": "Unauthorized."}, status=401)
-        device_id = request.query.get("device_id", "").strip() or self._default_device_id
+            return web.json_response(
+                {"ok": False, "error": "Unauthorized."}, status=401
+            )
+        device_id = (
+            request.query.get("device_id", "").strip() or self._default_device_id
+        )
         conversation_id = request.query.get("conversation_id", "main").strip() or "main"
         return web.json_response(
             {
@@ -477,11 +689,17 @@ class ThreeDSAdapter(BasePlatformAdapter):
 
     async def _handle_conversations(self, request: "web.Request") -> "web.Response":
         if not self._is_authorized(request):
-            return web.json_response({"ok": False, "error": "Unauthorized."}, status=401)
+            return web.json_response(
+                {"ok": False, "error": "Unauthorized."}, status=401
+            )
 
-        device_id = request.query.get("device_id", "").strip() or self._default_device_id
+        device_id = (
+            request.query.get("device_id", "").strip() or self._default_device_id
+        )
         if not device_id:
-            return web.json_response({"ok": False, "error": "device_id is required."}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "device_id is required."}, status=400
+            )
 
         try:
             requested_limit = int(request.query.get("limit", "8") or "8")
@@ -501,19 +719,27 @@ class ThreeDSAdapter(BasePlatformAdapter):
         try:
             payload = await request.json()
         except Exception:
-            return web.json_response({"ok": False, "error": "Invalid JSON."}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "Invalid JSON."}, status=400
+            )
 
         if not self._is_authorized(request, payload):
-            return web.json_response({"ok": False, "error": "Unauthorized."}, status=401)
+            return web.json_response(
+                {"ok": False, "error": "Unauthorized."}, status=401
+            )
 
         device_id = str(payload.get("device_id", "")).strip() or self._default_device_id
         conversation_id = str(payload.get("conversation_id", "main")).strip() or "main"
         message = str(payload.get("text") or payload.get("message") or "").strip()
 
         if not device_id:
-            return web.json_response({"ok": False, "error": "device_id is required."}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "device_id is required."}, status=400
+            )
         if not message:
-            return web.json_response({"ok": False, "error": "text is required."}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "text is required."}, status=400
+            )
 
         source = self._session_source(device_id, conversation_id)
         message_id = f"user-{uuid.uuid4().hex[:12]}"
@@ -525,20 +751,30 @@ class ThreeDSAdapter(BasePlatformAdapter):
             message_id=message_id,
         )
         await self.handle_message(event)
-        return web.json_response(self._message_ack_payload(source, conversation_id, message_id, ack_cursor))
+        return web.json_response(
+            self._message_ack_payload(source, conversation_id, message_id, ack_cursor)
+        )
 
     async def _handle_voice(self, request: "web.Request") -> "web.Response":
         if not self._is_authorized(request):
-            return web.json_response({"ok": False, "error": "Unauthorized."}, status=401)
+            return web.json_response(
+                {"ok": False, "error": "Unauthorized."}, status=401
+            )
 
-        device_id = request.query.get("device_id", "").strip() or self._default_device_id
+        device_id = (
+            request.query.get("device_id", "").strip() or self._default_device_id
+        )
         conversation_id = request.query.get("conversation_id", "main").strip() or "main"
         if not device_id:
-            return web.json_response({"ok": False, "error": "device_id is required."}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "device_id is required."}, status=400
+            )
 
         audio_bytes = await request.read()
         if not audio_bytes:
-            return web.json_response({"ok": False, "error": "voice body is required."}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "voice body is required."}, status=400
+            )
 
         content_type = request.content_type or "audio/wav"
         source = self._session_source(device_id, conversation_id)
@@ -556,19 +792,27 @@ class ThreeDSAdapter(BasePlatformAdapter):
             media_types=[content_type],
         )
         await self.handle_message(event)
-        return web.json_response(self._message_ack_payload(source, conversation_id, message_id, ack_cursor))
+        return web.json_response(
+            self._message_ack_payload(source, conversation_id, message_id, ack_cursor)
+        )
 
     async def _handle_events(self, request: "web.Request") -> "web.Response":
         if not self._is_authorized(request):
-            return web.json_response({"ok": False, "error": "Unauthorized."}, status=401)
+            return web.json_response(
+                {"ok": False, "error": "Unauthorized."}, status=401
+            )
 
-        device_id = request.query.get("device_id", "").strip() or self._default_device_id
+        device_id = (
+            request.query.get("device_id", "").strip() or self._default_device_id
+        )
         conversation_id = request.query.get("conversation_id", "main").strip() or "main"
         after_cursor = int(request.query.get("cursor", "0") or "0")
         wait_ms = int(request.query.get("wait", "0") or "0")
 
         if not device_id:
-            return web.json_response({"ok": False, "error": "device_id is required."}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "device_id is required."}, status=400
+            )
 
         deadline = asyncio.get_running_loop().time() + max(wait_ms, 0) / 1000.0
         async with self._event_condition:
@@ -598,7 +842,9 @@ class ThreeDSAdapter(BasePlatformAdapter):
                         }
                     )
                 try:
-                    await asyncio.wait_for(self._event_condition.wait(), timeout=remaining)
+                    await asyncio.wait_for(
+                        self._event_condition.wait(), timeout=remaining
+                    )
                 except asyncio.TimeoutError:
                     return web.json_response(
                         {
@@ -635,23 +881,33 @@ class ThreeDSAdapter(BasePlatformAdapter):
             )
         return payload
 
-    async def _handle_interaction_response(self, request: "web.Request") -> "web.Response":
+    async def _handle_interaction_response(
+        self, request: "web.Request"
+    ) -> "web.Response":
         request_id = request.match_info.get("request_id", "")
         try:
             payload = await request.json()
         except Exception:
-            return web.json_response({"ok": False, "error": "Invalid JSON."}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "Invalid JSON."}, status=400
+            )
 
         if not self._is_authorized(request, payload):
-            return web.json_response({"ok": False, "error": "Unauthorized."}, status=401)
+            return web.json_response(
+                {"ok": False, "error": "Unauthorized."}, status=401
+            )
 
         choice = str(payload.get("choice", "")).strip().lower()
         if choice not in {"once", "session", "always", "deny"}:
-            return web.json_response({"ok": False, "error": "Invalid choice."}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "Invalid choice."}, status=400
+            )
 
         pending = self._pending_interactions.pop(request_id, None)
         if pending is None:
-            return web.json_response({"ok": False, "error": "Unknown request_id."}, status=404)
+            return web.json_response(
+                {"ok": False, "error": "Unknown request_id."}, status=404
+            )
 
         resolve_gateway_approval(pending["session_key"], choice)
         await self._enqueue_event(
@@ -664,4 +920,6 @@ class ThreeDSAdapter(BasePlatformAdapter):
                 "choice": choice,
             }
         )
-        return web.json_response({"ok": True, "request_id": request_id, "choice": choice})
+        return web.json_response(
+            {"ok": True, "request_id": request_id, "choice": choice}
+        )
