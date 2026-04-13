@@ -36,6 +36,7 @@ from gateway.platforms.base import (
 )
 from gateway.session import SessionSource, build_session_key
 from tools.approval import resolve_gateway_approval
+from agent.model_metadata import get_model_context_length
 
 logger = logging.getLogger(__name__)
 
@@ -183,12 +184,128 @@ class ThreeDSAdapter(BasePlatformAdapter):
             "cursor": cursor,
         }
 
-    def _health_payload(self) -> dict[str, Any]:
+    def _health_payload(self, device_id: str = "", conversation_id: str = "main") -> dict[str, Any]:
         return {
             "ok": True,
             "platform": "3ds",
             "service": SERVICE_NAME,
             "version": TRANSPORT_NAME,
+            **self._telemetry_payload(device_id, conversation_id),
+        }
+
+    def _session_entry_for(self, device_id: str, conversation_id: str):
+        runner = getattr(self, "gateway_runner", None)
+        session_store = getattr(runner, "session_store", None) if runner is not None else None
+        session_key = self._session_key(device_id, conversation_id)
+        if session_store is None:
+            return session_key, None
+        try:
+            for entry in session_store.list_sessions():
+                if getattr(entry, "session_key", "") == session_key:
+                    return session_key, entry
+        except Exception as exc:
+            logger.debug("[3DS] Failed to list sessions for %s: %s", session_key, exc)
+        entries = getattr(session_store, "_entries", {})
+        return session_key, entries.get(session_key)
+
+    def _cached_or_running_agent_for(self, session_key: str):
+        runner = getattr(self, "gateway_runner", None)
+        if runner is None:
+            return None
+
+        agent = getattr(runner, "_running_agents", {}).get(session_key)
+        if agent is not None and hasattr(agent, "model"):
+            return agent
+
+        cache_lock = getattr(runner, "_agent_cache_lock", None)
+        cache = getattr(runner, "_agent_cache", None)
+        if cache_lock is None or cache is None:
+            return None
+
+        with cache_lock:
+            cached = cache.get(session_key)
+        if not cached:
+            return None
+        if isinstance(cached, tuple):
+            cached = cached[0]
+        if cached is not None and hasattr(cached, "model"):
+            return cached
+        return None
+
+    def _telemetry_payload(self, device_id: str = "", conversation_id: str = "main") -> dict[str, Any]:
+        resolved_device_id = (device_id or "").strip()
+        resolved_conversation_id = (conversation_id or "main").strip() or "main"
+        model_name = ""
+        context_length = 0
+        context_tokens = 0
+        context_percent = 0
+        runtime_kwargs: dict[str, Any] = {}
+
+        if not resolved_device_id:
+            return {
+                "model_name": model_name,
+                "context_length": context_length,
+                "context_tokens": context_tokens,
+                "context_percent": context_percent,
+            }
+
+        runner = getattr(self, "gateway_runner", None)
+        session_key, session_entry = self._session_entry_for(resolved_device_id, resolved_conversation_id)
+        agent = self._cached_or_running_agent_for(session_key)
+        if agent is None and session_entry is None:
+            return {
+                "model_name": model_name,
+                "context_length": context_length,
+                "context_tokens": context_tokens,
+                "context_percent": context_percent,
+            }
+
+        source = self._session_source(resolved_device_id, resolved_conversation_id)
+        if runner is not None and hasattr(runner, "_resolve_session_agent_runtime"):
+            try:
+                model_name, runtime_kwargs = runner._resolve_session_agent_runtime(
+                    source=source,
+                    session_key=session_key,
+                )
+            except Exception as exc:
+                logger.debug("[3DS] Failed to resolve session runtime for %s: %s", session_key, exc)
+                model_name = ""
+                runtime_kwargs = {}
+
+        if agent is not None:
+            model_name = getattr(agent, "model", model_name) or model_name
+            context_compressor = getattr(agent, "context_compressor", None)
+            if context_compressor is not None:
+                context_length = int(getattr(context_compressor, "context_length", 0) or 0)
+                context_tokens = int(getattr(context_compressor, "last_prompt_tokens", 0) or 0)
+
+        if context_tokens == 0 and session_entry is not None:
+            context_tokens = int(getattr(session_entry, "last_prompt_tokens", 0) or 0)
+
+        if model_name and context_length <= 0:
+            try:
+                context_length = int(
+                    get_model_context_length(
+                        model_name,
+                        base_url=(runtime_kwargs.get("base_url") or ""),
+                        api_key=(runtime_kwargs.get("api_key") or ""),
+                        provider=(runtime_kwargs.get("provider") or ""),
+                    ) or 0
+                )
+            except Exception as exc:
+                logger.debug("[3DS] Failed to resolve context length for %s: %s", model_name, exc)
+                context_length = 0
+
+        if context_length > 0 and context_tokens > 0:
+            context_percent = max(0, min(100, round((context_tokens / context_length) * 100)))
+        elif context_length > 0:
+            context_percent = 0
+
+        return {
+            "model_name": model_name,
+            "context_length": context_length,
+            "context_tokens": context_tokens,
+            "context_percent": context_percent,
         }
 
     def _extract_token(self, request: "web.Request", payload: Optional[dict[str, Any]] = None) -> str:
@@ -331,11 +448,22 @@ class ThreeDSAdapter(BasePlatformAdapter):
         return first, missed_events
 
     async def _handle_v2_health(self, request: "web.Request") -> "web.Response":
-        return web.json_response(self._health_payload())
+        raw_device_id = request.query.get("device_id", "").strip()
+        raw_conversation_id = request.query.get("conversation_id", "").strip()
+        telemetry_requested = bool(raw_device_id or raw_conversation_id)
+        if telemetry_requested and not self._is_authorized(request):
+            return web.json_response({"ok": False, "error": "Unauthorized."}, status=401)
+        if not telemetry_requested:
+            return web.json_response(self._health_payload("", "main"))
+        device_id = raw_device_id or self._default_device_id
+        conversation_id = raw_conversation_id or "main"
+        return web.json_response(self._health_payload(device_id, conversation_id))
 
     async def _handle_capabilities(self, request: "web.Request") -> "web.Response":
         if not self._is_authorized(request):
             return web.json_response({"ok": False, "error": "Unauthorized."}, status=401)
+        device_id = request.query.get("device_id", "").strip() or self._default_device_id
+        conversation_id = request.query.get("conversation_id", "main").strip() or "main"
         return web.json_response(
             {
                 "ok": True,
@@ -343,6 +471,7 @@ class ThreeDSAdapter(BasePlatformAdapter):
                 "service": SERVICE_NAME,
                 "version": TRANSPORT_NAME,
                 "transport": TRANSPORT_NAME,
+                **self._telemetry_payload(device_id, conversation_id),
             }
         )
 

@@ -97,12 +97,175 @@ async def test_native_health_and_capabilities_endpoints_return_expected_payload(
         assert body["ok"] is True
         assert body["platform"] == "3ds"
         assert body["version"]
+        assert "model_name" in body
+        assert "context_length" in body
+        assert "context_tokens" in body
+        assert "context_percent" in body
 
         resp = await cli.get("/api/v2/capabilities?token=tok")
         assert resp.status == 200
         body = await resp.json()
         assert body["ok"] is True
         assert body["transport"] == "http-long-poll"
+        assert "model_name" in body
+        assert "context_length" in body
+        assert "context_tokens" in body
+        assert "context_percent" in body
+
+
+@pytest.mark.asyncio
+@patch("gateway.platforms.threeds.AIOHTTP_AVAILABLE", True)
+@patch("gateway.platforms.threeds.get_model_context_length", return_value=128000)
+async def test_health_endpoint_returns_live_session_model_and_context_telemetry(_mock_ctx_len, tmp_path):
+    from gateway.platforms.threeds import ThreeDSAdapter
+
+    adapter = ThreeDSAdapter(PlatformConfig(enabled=True, extra={"auth_token": "***"}))
+    runner = GatewayRunner(GatewayConfig())
+    session_key = adapter._session_key("old3ds", "main")
+
+    class _FakeContextCompressor:
+        context_length = 128000
+        last_prompt_tokens = 32000
+
+    class _FakeAgent:
+        model = "gpt-5.4"
+        context_compressor = _FakeContextCompressor()
+
+    runner._running_agents[session_key] = _FakeAgent()
+    adapter.gateway_runner = runner
+    app = _create_app(adapter)
+
+    async with TestClient(TestServer(app)) as cli:
+        resp = await cli.get("/api/v2/health?token=***&device_id=old3ds&conversation_id=main")
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["model_name"] == "gpt-5.4"
+        assert body["context_length"] == 128000
+        assert body["context_tokens"] == 32000
+        assert body["context_percent"] == 25
+
+
+@pytest.mark.asyncio
+@patch("gateway.platforms.threeds.AIOHTTP_AVAILABLE", True)
+@patch("gateway.platforms.threeds.get_model_context_length", return_value=200000)
+async def test_health_endpoint_uses_session_override_and_stored_prompt_tokens_when_no_live_agent(_mock_ctx_len, tmp_path):
+    from datetime import datetime
+
+    from gateway.platforms.threeds import ThreeDSAdapter
+    from gateway.session import SessionEntry, SessionSource, SessionStore
+
+    adapter = ThreeDSAdapter(PlatformConfig(enabled=True, extra={"auth_token": "***"}))
+    runner = GatewayRunner(GatewayConfig())
+    runner.session_store = SessionStore(tmp_path / "sessions", GatewayConfig())
+    runner.session_store._loaded = True
+
+    session_key = adapter._session_key("old3ds", "focus")
+    now = datetime.now()
+    runner.session_store._entries = {
+        session_key: SessionEntry(
+            session_key=session_key,
+            session_id="sid-focus",
+            created_at=now,
+            updated_at=now,
+            origin=SessionSource(
+                platform=Platform.THREEDS,
+                chat_id="3ds:old3ds",
+                chat_name="3DS old3ds",
+                chat_type="dm",
+                user_id="old3ds",
+                user_name="old3ds",
+                thread_id="focus",
+            ),
+            display_name="3DS old3ds",
+            platform=Platform.THREEDS,
+            chat_type="dm",
+            last_prompt_tokens=50000,
+        )
+    }
+    runner._session_model_overrides[session_key] = {
+        "model": "gpt-5.4-mini",
+        "provider": "openai-codex",
+        "api_key": "test-key",
+        "base_url": "https://chatgpt.com/backend-api/codex",
+        "api_mode": "codex_responses",
+    }
+    adapter.gateway_runner = runner
+    app = _create_app(adapter)
+
+    async with TestClient(TestServer(app)) as cli:
+        resp = await cli.get("/api/v2/health?token=***&device_id=old3ds&conversation_id=focus")
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["model_name"] == "gpt-5.4-mini"
+        assert body["context_length"] == 200000
+        assert body["context_tokens"] == 50000
+        assert body["context_percent"] == 25
+
+
+@pytest.mark.asyncio
+@patch("gateway.platforms.threeds.AIOHTTP_AVAILABLE", True)
+@patch("gateway.platforms.threeds.get_model_context_length", return_value=128000)
+async def test_health_endpoint_returns_empty_telemetry_for_unknown_session(_mock_ctx_len):
+    from gateway.platforms.threeds import ThreeDSAdapter
+
+    adapter = ThreeDSAdapter(PlatformConfig(enabled=True, extra={"auth_token": "tok", "device_id": "old3ds"}))
+    runner = GatewayRunner(GatewayConfig())
+    adapter.gateway_runner = runner
+    app = _create_app(adapter)
+
+    async with TestClient(TestServer(app)) as cli:
+        resp = await cli.get("/api/v2/health?token=tok&device_id=ghost3ds&conversation_id=missing")
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["model_name"] == ""
+        assert body["context_length"] == 0
+        assert body["context_tokens"] == 0
+        assert body["context_percent"] == 0
+
+
+@pytest.mark.asyncio
+@patch("gateway.platforms.threeds.AIOHTTP_AVAILABLE", True)
+@patch("gateway.platforms.threeds.get_model_context_length", return_value=128000)
+async def test_capabilities_endpoint_returns_session_scoped_telemetry(_mock_ctx_len):
+    from gateway.platforms.threeds import ThreeDSAdapter
+
+    adapter = ThreeDSAdapter(PlatformConfig(enabled=True, extra={"auth_token": "tok"}))
+    runner = GatewayRunner(GatewayConfig())
+    session_key = adapter._session_key("old3ds", "main")
+
+    class _FakeContextCompressor:
+        context_length = 128000
+        last_prompt_tokens = 6400
+
+    class _FakeAgent:
+        model = "gpt-5.4"
+        context_compressor = _FakeContextCompressor()
+
+    runner._running_agents[session_key] = _FakeAgent()
+    adapter.gateway_runner = runner
+    app = _create_app(adapter)
+
+    async with TestClient(TestServer(app)) as cli:
+        resp = await cli.get("/api/v2/capabilities?token=tok&device_id=old3ds&conversation_id=main")
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["model_name"] == "gpt-5.4"
+        assert body["context_length"] == 128000
+        assert body["context_tokens"] == 6400
+        assert body["context_percent"] == 5
+
+
+@pytest.mark.asyncio
+@patch("gateway.platforms.threeds.AIOHTTP_AVAILABLE", True)
+async def test_health_endpoint_requires_auth_for_session_scoped_telemetry_when_token_is_configured():
+    from gateway.platforms.threeds import ThreeDSAdapter
+
+    adapter = ThreeDSAdapter(PlatformConfig(enabled=True, extra={"auth_token": "tok"}))
+    app = _create_app(adapter)
+
+    async with TestClient(TestServer(app)) as cli:
+        resp = await cli.get("/api/v2/health?device_id=old3ds&conversation_id=main")
+        assert resp.status == 401
 
 
 @pytest.mark.asyncio
