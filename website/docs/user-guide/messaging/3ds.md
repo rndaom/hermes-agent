@@ -20,8 +20,10 @@ The 3DS client speaks a small V2 HTTP API:
 - `GET /api/v2/capabilities`
 - `GET /api/v2/conversations`
 - `POST /api/v2/messages`
+- `POST /api/v2/image`
 - `POST /api/v2/voice`
 - `GET /api/v2/events`
+- `GET /api/v2/media/{media_id}`
 - `POST /api/v2/interactions/{request_id}/respond`
 
 ---
@@ -36,6 +38,22 @@ The 3DS client speaks a small V2 HTTP API:
 ---
 
 ## Configure Hermes
+
+### Option 0: guided setup
+
+Run either:
+
+```bash
+hermes setup gateway
+```
+
+or:
+
+```bash
+hermes gateway setup
+```
+
+Then select `Nintendo 3DS` and enter the bind host, port, auth token, and optional default device ID.
 
 ### Option 1: `.env`
 

@@ -5892,24 +5892,28 @@ class GatewayRunner:
                         await adapter.send_voice(
                             chat_id=event.source.chat_id,
                             audio_path=media_path,
+                            reply_to=event.message_id,
                             metadata=_thread_meta,
                         )
                     elif ext in _VIDEO_EXTS:
                         await adapter.send_video(
                             chat_id=event.source.chat_id,
                             video_path=media_path,
+                            reply_to=event.message_id,
                             metadata=_thread_meta,
                         )
                     elif ext in _IMAGE_EXTS:
                         await adapter.send_image_file(
                             chat_id=event.source.chat_id,
                             image_path=media_path,
+                            reply_to=event.message_id,
                             metadata=_thread_meta,
                         )
                     else:
                         await adapter.send_document(
                             chat_id=event.source.chat_id,
                             file_path=media_path,
+                            reply_to=event.message_id,
                             metadata=_thread_meta,
                         )
                 except Exception as e:
@@ -5924,12 +5928,14 @@ class GatewayRunner:
                         await adapter.send_image_file(
                             chat_id=event.source.chat_id,
                             image_path=file_path,
+                            reply_to=event.message_id,
                             metadata=_thread_meta,
                         )
                     else:
                         await adapter.send_document(
                             chat_id=event.source.chat_id,
                             file_path=file_path,
+                            reply_to=event.message_id,
                             metadata=_thread_meta,
                         )
                 except Exception as e:

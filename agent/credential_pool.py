@@ -71,8 +71,8 @@ SUPPORTED_POOL_STRATEGIES = {
 # Cooldown before retrying an exhausted credential.
 # 429 (rate-limited) and 402 (billing/quota) both cool down after 1 hour.
 # Provider-supplied reset_at timestamps override these defaults.
-EXHAUSTED_TTL_429_SECONDS = 60 * 60          # 1 hour
-EXHAUSTED_TTL_DEFAULT_SECONDS = 60 * 60      # 1 hour
+EXHAUSTED_TTL_429_SECONDS = 60 * 60  # 1 hour
+EXHAUSTED_TTL_DEFAULT_SECONDS = 60 * 60  # 1 hour
 
 # Pool key prefix for custom OpenAI-compatible endpoints.
 # Custom endpoints all share provider='custom' but are keyed by their
@@ -81,11 +81,21 @@ CUSTOM_POOL_PREFIX = "custom:"
 
 
 # Fields that are only round-tripped through JSON — never used for logic as attributes.
-_EXTRA_KEYS = frozenset({
-    "token_type", "scope", "client_id", "portal_base_url", "obtained_at",
-    "expires_in", "agent_key_id", "agent_key_expires_in", "agent_key_reused",
-    "agent_key_obtained_at", "tls",
-})
+_EXTRA_KEYS = frozenset(
+    {
+        "token_type",
+        "scope",
+        "client_id",
+        "portal_base_url",
+        "obtained_at",
+        "expires_in",
+        "agent_key_id",
+        "agent_key_expires_in",
+        "agent_key_reused",
+        "agent_key_obtained_at",
+        "tls",
+    }
+)
 
 
 @dataclass
@@ -121,13 +131,19 @@ class PooledCredential:
     def __getattr__(self, name: str):
         if name in _EXTRA_KEYS:
             return self.extra.get(name)
-        raise AttributeError(f"'{type(self).__name__}' object has no attribute {name!r}")
+        raise AttributeError(
+            f"'{type(self).__name__}' object has no attribute {name!r}"
+        )
 
     @classmethod
     def from_dict(cls, provider: str, payload: Dict[str, Any]) -> "PooledCredential":
         field_names = {f.name for f in fields(cls) if f.name != "provider"}
         data = {k: payload.get(k) for k in field_names if k in payload}
-        extra = {k: payload[k] for k in _EXTRA_KEYS if k in payload and payload[k] is not None}
+        extra = {
+            k: payload[k]
+            for k in _EXTRA_KEYS
+            if k in payload and payload[k] is not None
+        }
         data["extra"] = extra
         data.setdefault("id", uuid.uuid4().hex[:6])
         data.setdefault("label", payload.get("source", provider))
@@ -229,11 +245,17 @@ def _parse_absolute_timestamp(value: Any) -> Optional[float]:
 def _extract_retry_delay_seconds(message: str) -> Optional[float]:
     if not message:
         return None
-    delay_match = re.search(r"quotaResetDelay[:\s\"]+(\d+(?:\.\d+)?)(ms|s)", message, re.IGNORECASE)
+    delay_match = re.search(
+        r"quotaResetDelay[:\s\"]+(\d+(?:\.\d+)?)(ms|s)", message, re.IGNORECASE
+    )
     if delay_match:
         value = float(delay_match.group(1))
         return value / 1000.0 if delay_match.group(2).lower() == "ms" else value
-    sec_match = re.search(r"retry\s+(?:after\s+)?(\d+(?:\.\d+)?)\s*(?:sec|secs|seconds|s\b)", message, re.IGNORECASE)
+    sec_match = re.search(
+        r"retry\s+(?:after\s+)?(\d+(?:\.\d+)?)\s*(?:sec|secs|seconds|s\b)",
+        message,
+        re.IGNORECASE,
+    )
     if sec_match:
         return float(sec_match.group(1))
     return None
@@ -288,12 +310,39 @@ def _iter_custom_providers(config: Optional[dict] = None):
         return
     custom_providers = config.get("custom_providers")
     if not isinstance(custom_providers, list):
-        # Fall back to the v12+ providers dict via the compatibility layer
-        try:
-            from hermes_cli.config import get_compatible_custom_providers
-
-            custom_providers = get_compatible_custom_providers(config)
-        except Exception:
+        providers = config.get("providers")
+        if isinstance(providers, dict):
+            custom_providers = []
+            for provider_key, entry in providers.items():
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get("name") or provider_key or "").strip()
+                base_url = str(
+                    entry.get("base_url") or entry.get("api") or entry.get("url") or ""
+                ).strip()
+                if not name or not base_url:
+                    continue
+                normalized = {
+                    "name": name,
+                    "base_url": base_url,
+                }
+                default_model = str(entry.get("default_model") or "").strip()
+                if default_model:
+                    normalized["model"] = default_model
+                key_env = str(entry.get("key_env") or "").strip()
+                if key_env:
+                    normalized["key_env"] = key_env
+                api_key = str(entry.get("api_key") or "").strip()
+                if api_key:
+                    normalized["api_key"] = api_key
+                api_mode = str(
+                    entry.get("transport") or entry.get("api_mode") or ""
+                ).strip()
+                if api_mode:
+                    normalized["api_mode"] = api_mode
+                normalized["provider_key"] = str(provider_key)
+                custom_providers.append(normalized)
+        else:
             return
     if not custom_providers:
         return
@@ -325,7 +374,8 @@ def list_custom_pool_providers() -> List[str]:
     """Return all 'custom:*' pool keys that have entries in auth.json."""
     pool_data = read_credential_pool(None)
     return sorted(
-        key for key in pool_data
+        key
+        for key in pool_data
         if key.startswith(CUSTOM_POOL_PREFIX)
         and isinstance(pool_data.get(key), list)
         and pool_data[key]
@@ -336,7 +386,7 @@ def _get_custom_provider_config(pool_key: str) -> Optional[Dict[str, Any]]:
     """Return the custom_providers config entry matching a pool key like 'custom:together.ai'."""
     if not pool_key.startswith(CUSTOM_POOL_PREFIX):
         return None
-    suffix = pool_key[len(CUSTOM_POOL_PREFIX):]
+    suffix = pool_key[len(CUSTOM_POOL_PREFIX) :]
     for norm_name, entry in _iter_custom_providers():
         if norm_name == suffix:
             return entry
@@ -385,7 +435,9 @@ class CredentialPool:
     def current(self) -> Optional[PooledCredential]:
         if not self._current_id:
             return None
-        return next((entry for entry in self._entries if entry.id == self._current_id), None)
+        return next(
+            (entry for entry in self._entries if entry.id == self._current_id), None
+        )
 
     def _replace_entry(self, old: PooledCredential, new: PooledCredential) -> None:
         """Swap an entry in-place by id, preserving sort order."""
@@ -420,7 +472,9 @@ class CredentialPool:
         self._persist()
         return updated
 
-    def _sync_anthropic_entry_from_credentials_file(self, entry: PooledCredential) -> PooledCredential:
+    def _sync_anthropic_entry_from_credentials_file(
+        self, entry: PooledCredential
+    ) -> PooledCredential:
         """Sync a claude_code pool entry from ~/.claude/.credentials.json if tokens differ.
 
         OAuth refresh tokens are single-use. When something external (e.g.
@@ -432,6 +486,7 @@ class CredentialPool:
             return entry
         try:
             from agent.anthropic_adapter import read_claude_code_credentials
+
             creds = read_claude_code_credentials()
             if not creds:
                 return entry
@@ -440,7 +495,10 @@ class CredentialPool:
             file_expires = creds.get("expiresAt", 0)
             # If the credentials file has a different token pair, sync it
             if file_refresh and file_refresh != entry.refresh_token:
-                logger.debug("Pool entry %s: syncing tokens from credentials file (refresh token changed)", entry.id)
+                logger.debug(
+                    "Pool entry %s: syncing tokens from credentials file (refresh token changed)",
+                    entry.id,
+                )
                 updated = replace(
                     entry,
                     access_token=file_access,
@@ -474,7 +532,10 @@ class CredentialPool:
             cli_refresh = cli_tokens.get("refresh_token", "")
             cli_access = cli_tokens.get("access_token", "")
             if cli_refresh and cli_refresh != entry.refresh_token:
-                logger.debug("Pool entry %s: syncing tokens from ~/.codex/auth.json (refresh token changed)", entry.id)
+                logger.debug(
+                    "Pool entry %s: syncing tokens from ~/.codex/auth.json (refresh token changed)",
+                    entry.id,
+                )
                 updated = replace(
                     entry,
                     access_token=cli_access,
@@ -520,9 +581,14 @@ class CredentialPool:
                         state["agent_key"] = entry.agent_key
                     if entry.agent_key_expires_at:
                         state["agent_key_expires_at"] = entry.agent_key_expires_at
-                    for extra_key in ("obtained_at", "expires_in", "agent_key_id",
-                                      "agent_key_expires_in", "agent_key_reused",
-                                      "agent_key_obtained_at"):
+                    for extra_key in (
+                        "obtained_at",
+                        "expires_in",
+                        "agent_key_id",
+                        "agent_key_expires_in",
+                        "agent_key_reused",
+                        "agent_key_obtained_at",
+                    ):
                         val = entry.extra.get(extra_key)
                         if val is not None:
                             state[extra_key] = val
@@ -549,9 +615,15 @@ class CredentialPool:
 
                 _save_auth_store(auth_store)
         except Exception as exc:
-            logger.debug("Failed to sync %s pool entry back to auth store: %s", self.provider, exc)
+            logger.debug(
+                "Failed to sync %s pool entry back to auth store: %s",
+                self.provider,
+                exc,
+            )
 
-    def _refresh_entry(self, entry: PooledCredential, *, force: bool) -> Optional[PooledCredential]:
+    def _refresh_entry(
+        self, entry: PooledCredential, *, force: bool
+    ) -> Optional[PooledCredential]:
         if entry.auth_type != AUTH_TYPE_OAUTH or not entry.refresh_token:
             if force:
                 self._mark_exhausted(entry, None)
@@ -576,14 +648,20 @@ class CredentialPool:
                 # see the latest tokens.
                 if entry.source == "claude_code":
                     try:
-                        from agent.anthropic_adapter import _write_claude_code_credentials
+                        from agent.anthropic_adapter import (
+                            _write_claude_code_credentials,
+                        )
+
                         _write_claude_code_credentials(
                             refreshed["access_token"],
                             refreshed["refresh_token"],
                             refreshed["expires_at_ms"],
                         )
                     except Exception as wexc:
-                        logger.debug("Failed to write refreshed token to credentials file: %s", wexc)
+                        logger.debug(
+                            "Failed to write refreshed token to credentials file: %s",
+                            wexc,
+                        )
             elif self.provider == "openai-codex":
                 # Proactively sync from ~/.codex/auth.json before refresh.
                 # The Codex CLI (or another Hermes profile) may have already
@@ -636,16 +714,21 @@ class CredentialPool:
             else:
                 return entry
         except Exception as exc:
-            logger.debug("Credential refresh failed for %s/%s: %s", self.provider, entry.id, exc)
+            logger.debug(
+                "Credential refresh failed for %s/%s: %s", self.provider, entry.id, exc
+            )
             # For anthropic claude_code entries: the refresh token may have been
             # consumed by another process. Check if ~/.claude/.credentials.json
             # has a newer token pair and retry once.
             if self.provider == "anthropic" and entry.source == "claude_code":
                 synced = self._sync_anthropic_entry_from_credentials_file(entry)
                 if synced.refresh_token != entry.refresh_token:
-                    logger.debug("Retrying refresh with synced token from credentials file")
+                    logger.debug(
+                        "Retrying refresh with synced token from credentials file"
+                    )
                     try:
                         from agent.anthropic_adapter import refresh_anthropic_oauth_pure
+
                         refreshed = refresh_anthropic_oauth_pure(
                             synced.refresh_token,
                             use_json=synced.source.endswith("hermes_pkce"),
@@ -662,20 +745,28 @@ class CredentialPool:
                         self._replace_entry(synced, updated)
                         self._persist()
                         try:
-                            from agent.anthropic_adapter import _write_claude_code_credentials
+                            from agent.anthropic_adapter import (
+                                _write_claude_code_credentials,
+                            )
+
                             _write_claude_code_credentials(
                                 refreshed["access_token"],
                                 refreshed["refresh_token"],
                                 refreshed["expires_at_ms"],
                             )
                         except Exception as wexc:
-                            logger.debug("Failed to write refreshed token to credentials file (retry path): %s", wexc)
+                            logger.debug(
+                                "Failed to write refreshed token to credentials file (retry path): %s",
+                                wexc,
+                            )
                         return updated
                     except Exception as retry_exc:
                         logger.debug("Retry refresh also failed: %s", retry_exc)
                 elif not self._entry_needs_refresh(synced):
                     # Credentials file had a valid (non-expired) token — use it directly
-                    logger.debug("Credentials file has valid token, using without refresh")
+                    logger.debug(
+                        "Credentials file has valid token, using without refresh"
+                    )
                     return synced
             # For openai-codex: the refresh_token may have been consumed by
             # the Codex CLI between our proactive sync and the refresh call.
@@ -683,7 +774,9 @@ class CredentialPool:
             if self.provider == "openai-codex":
                 synced = self._sync_codex_entry_from_cli(entry)
                 if synced.refresh_token != entry.refresh_token:
-                    logger.debug("Retrying Codex refresh with synced token from ~/.codex/auth.json")
+                    logger.debug(
+                        "Retrying Codex refresh with synced token from ~/.codex/auth.json"
+                    )
                     try:
                         refreshed = auth_mod.refresh_codex_oauth_pure(
                             synced.access_token,
@@ -708,7 +801,10 @@ class CredentialPool:
                                 last_refresh=updated.last_refresh,
                             )
                         except Exception as wexc:
-                            logger.debug("Failed to write refreshed Codex tokens to CLI file (retry): %s", wexc)
+                            logger.debug(
+                                "Failed to write refreshed Codex tokens to CLI file (retry): %s",
+                                wexc,
+                            )
                         return updated
                     except Exception as retry_exc:
                         logger.debug("Codex retry refresh also failed: %s", retry_exc)
@@ -744,7 +840,9 @@ class CredentialPool:
                     last_refresh=updated.last_refresh,
                 )
             except Exception as wexc:
-                logger.debug("Failed to write refreshed Codex tokens to CLI file: %s", wexc)
+                logger.debug(
+                    "Failed to write refreshed Codex tokens to CLI file: %s", wexc
+                )
         return updated
 
     def _entry_needs_refresh(self, entry: PooledCredential) -> bool:
@@ -770,7 +868,9 @@ class CredentialPool:
         with self._lock:
             return self._select_unlocked()
 
-    def _available_entries(self, *, clear_expired: bool = False, refresh: bool = False) -> List[PooledCredential]:
+    def _available_entries(
+        self, *, clear_expired: bool = False, refresh: bool = False
+    ) -> List[PooledCredential]:
         """Return entries not currently in exhaustion cooldown.
 
         When *clear_expired* is True, entries whose cooldown has elapsed are
@@ -784,8 +884,11 @@ class CredentialPool:
             # For anthropic claude_code entries, sync from the credentials file
             # before any status/refresh checks. This picks up tokens refreshed
             # by other processes (Claude Code CLI, other Hermes profiles).
-            if (self.provider == "anthropic" and entry.source == "claude_code"
-                    and entry.last_status == STATUS_EXHAUSTED):
+            if (
+                self.provider == "anthropic"
+                and entry.source == "claude_code"
+                and entry.last_status == STATUS_EXHAUSTED
+            ):
                 synced = self._sync_anthropic_entry_from_credentials_file(entry)
                 if synced is not entry:
                     entry = synced
@@ -793,9 +896,11 @@ class CredentialPool:
             # For openai-codex entries, sync from ~/.codex/auth.json before
             # any status/refresh checks.  This picks up tokens refreshed by
             # the Codex CLI or another Hermes profile.
-            if (self.provider == "openai-codex"
-                    and entry.last_status == STATUS_EXHAUSTED
-                    and entry.refresh_token):
+            if (
+                self.provider == "openai-codex"
+                and entry.last_status == STATUS_EXHAUSTED
+                and entry.refresh_token
+            ):
                 synced = self._sync_codex_entry_from_cli(entry)
                 if synced is not entry:
                     entry = synced
@@ -831,7 +936,9 @@ class CredentialPool:
         available = self._available_entries(clear_expired=True, refresh=True)
         if not available:
             self._current_id = None
-            logger.info("credential pool: no available entries (all exhausted or empty)")
+            logger.info(
+                "credential pool: no available entries (all exhausted or empty)"
+            )
             return None
 
         if self._strategy == STRATEGY_RANDOM:
@@ -846,9 +953,14 @@ class CredentialPool:
 
         if self._strategy == STRATEGY_ROUND_ROBIN and len(available) > 1:
             entry = available[0]
-            rotated = [candidate for candidate in self._entries if candidate.id != entry.id]
+            rotated = [
+                candidate for candidate in self._entries if candidate.id != entry.id
+            ]
             rotated.append(replace(entry, priority=len(self._entries) - 1))
-            self._entries = [replace(candidate, priority=idx) for idx, candidate in enumerate(rotated)]
+            self._entries = [
+                replace(candidate, priority=idx)
+                for idx, candidate in enumerate(rotated)
+            ]
             self._persist()
             self._current_id = entry.id
             return self.current() or entry
@@ -877,7 +989,8 @@ class CredentialPool:
             _label = entry.label or entry.id[:8]
             logger.info(
                 "credential pool: marking %s exhausted (status=%s), rotating",
-                _label, status_code,
+                _label,
+                status_code,
             )
             self._mark_exhausted(entry, status_code, error_context)
             self._current_id = None
@@ -897,7 +1010,9 @@ class CredentialPool:
         """
         with self._lock:
             if credential_id:
-                self._active_leases[credential_id] = self._active_leases.get(credential_id, 0) + 1
+                self._active_leases[credential_id] = (
+                    self._active_leases.get(credential_id, 0) + 1
+                )
                 self._current_id = credential_id
                 return credential_id
 
@@ -906,13 +1021,17 @@ class CredentialPool:
                 return None
 
             below_cap = [
-                entry for entry in available
+                entry
+                for entry in available
                 if self._active_leases.get(entry.id, 0) < self._max_concurrent
             ]
             candidates = below_cap if below_cap else available
             chosen = min(
                 candidates,
-                key=lambda entry: (self._active_leases.get(entry.id, 0), entry.priority),
+                key=lambda entry: (
+                    self._active_leases.get(entry.id, 0),
+                    entry.priority,
+                ),
             )
             self._active_leases[chosen.id] = self._active_leases.get(chosen.id, 0) + 1
             self._current_id = chosen.id
@@ -977,7 +1096,9 @@ class CredentialPool:
             self._current_id = None
         return removed
 
-    def resolve_target(self, target: Any) -> Tuple[Optional[int], Optional[PooledCredential], Optional[str]]:
+    def resolve_target(
+        self, target: Any
+    ) -> Tuple[Optional[int], Optional[PooledCredential], Optional[str]]:
         raw = str(target or "").strip()
         if not raw:
             return None, None, "No credential target provided."
@@ -994,7 +1115,11 @@ class CredentialPool:
         if len(label_matches) == 1:
             return label_matches[0][0], label_matches[0][1], None
         if len(label_matches) > 1:
-            return None, None, f'Ambiguous credential label "{raw}". Use the numeric index or entry id instead.'
+            return (
+                None,
+                None,
+                f'Ambiguous credential label "{raw}". Use the numeric index or entry id instead.',
+            )
         if raw.isdigit():
             index = int(raw)
             if 1 <= index <= len(self._entries):
@@ -1009,7 +1134,9 @@ class CredentialPool:
         return entry
 
 
-def _upsert_entry(entries: List[PooledCredential], provider: str, source: str, payload: Dict[str, Any]) -> bool:
+def _upsert_entry(
+    entries: List[PooledCredential], provider: str, source: str, payload: Dict[str, Any]
+) -> bool:
     existing_idx = None
     for idx, entry in enumerate(entries):
         if entry.source == source:
@@ -1080,7 +1207,9 @@ def _normalize_pool_priorities(provider: str, entries: List[PooledCredential]) -
     return changed
 
 
-def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> Tuple[bool, Set[str]]:
+def _seed_from_singletons(
+    provider: str, entries: List[PooledCredential]
+) -> Tuple[bool, Set[str]]:
     changed = False
     active_sources: Set[str] = set()
     auth_store = _load_auth_store()
@@ -1092,12 +1221,16 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> Tup
         # ~/.claude/.credentials.json without user consent.  See PR #4210.
         try:
             from hermes_cli.auth import is_provider_explicitly_configured
+
             if not is_provider_explicitly_configured("anthropic"):
                 return changed, active_sources
         except ImportError:
             pass
 
-        from agent.anthropic_adapter import read_claude_code_credentials, read_hermes_oauth_credentials
+        from agent.anthropic_adapter import (
+            read_claude_code_credentials,
+            read_hermes_oauth_credentials,
+        )
 
         for source_name, creds in (
             ("hermes_pkce", read_hermes_oauth_credentials()),
@@ -1107,6 +1240,7 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> Tup
                 # Check if user explicitly removed this source
                 try:
                     from hermes_cli.auth import is_source_suppressed
+
                     if is_source_suppressed(provider, source_name):
                         continue
                 except ImportError:
@@ -1122,7 +1256,9 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> Tup
                         "access_token": creds.get("accessToken", ""),
                         "refresh_token": creds.get("refreshToken"),
                         "expires_at_ms": creds.get("expiresAt"),
-                        "label": label_from_token(creds.get("accessToken", ""), source_name),
+                        "label": label_from_token(
+                            creds.get("accessToken", ""), source_name
+                        ),
                     },
                 )
 
@@ -1147,8 +1283,12 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> Tup
                     "inference_base_url": state.get("inference_base_url"),
                     "agent_key": state.get("agent_key"),
                     "agent_key_expires_at": state.get("agent_key_expires_at"),
-                    "tls": state.get("tls") if isinstance(state.get("tls"), dict) else None,
-                    "label": label_from_token(state.get("access_token", ""), "device_code"),
+                    "tls": state.get("tls")
+                    if isinstance(state.get("tls"), dict)
+                    else None,
+                    "label": label_from_token(
+                        state.get("access_token", ""), "device_code"
+                    ),
                 },
             )
 
@@ -1162,6 +1302,7 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> Tup
         if not (isinstance(tokens, dict) and tokens.get("access_token")):
             try:
                 from hermes_cli.auth import _import_codex_cli_tokens, _save_codex_tokens
+
                 cli_tokens = _import_codex_cli_tokens()
                 if cli_tokens:
                     logger.info("Importing Codex CLI tokens into Hermes auth store.")
@@ -1185,14 +1326,18 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> Tup
                     "refresh_token": tokens.get("refresh_token"),
                     "base_url": "https://chatgpt.com/backend-api/codex",
                     "last_refresh": state.get("last_refresh"),
-                    "label": label_from_token(tokens.get("access_token", ""), "device_code"),
+                    "label": label_from_token(
+                        tokens.get("access_token", ""), "device_code"
+                    ),
                 },
             )
 
     return changed, active_sources
 
 
-def _seed_from_env(provider: str, entries: List[PooledCredential]) -> Tuple[bool, Set[str]]:
+def _seed_from_env(
+    provider: str, entries: List[PooledCredential]
+) -> Tuple[bool, Set[str]]:
     changed = False
     active_sources: Set[str] = set()
     if provider == "openrouter":
@@ -1236,10 +1381,16 @@ def _seed_from_env(provider: str, entries: List[PooledCredential]) -> Tuple[bool
             continue
         source = f"env:{env_var}"
         active_sources.add(source)
-        auth_type = AUTH_TYPE_OAUTH if provider == "anthropic" and not token.startswith("sk-ant-api") else AUTH_TYPE_API_KEY
+        auth_type = (
+            AUTH_TYPE_OAUTH
+            if provider == "anthropic" and not token.startswith("sk-ant-api")
+            else AUTH_TYPE_API_KEY
+        )
         base_url = env_url or pconfig.inference_base_url
         if provider == "kimi-coding":
-            base_url = _resolve_kimi_base_url(token, pconfig.inference_base_url, env_url)
+            base_url = _resolve_kimi_base_url(
+                token, pconfig.inference_base_url, env_url
+            )
         elif provider == "zai":
             base_url = _resolve_zai_base_url(token, pconfig.inference_base_url, env_url)
         changed |= _upsert_entry(
@@ -1257,7 +1408,9 @@ def _seed_from_env(provider: str, entries: List[PooledCredential]) -> Tuple[bool
     return changed, active_sources
 
 
-def _prune_stale_seeded_entries(entries: List[PooledCredential], active_sources: Set[str]) -> bool:
+def _prune_stale_seeded_entries(
+    entries: List[PooledCredential], active_sources: Set[str]
+) -> bool:
     retained = [
         entry
         for entry in entries
@@ -1274,7 +1427,9 @@ def _prune_stale_seeded_entries(entries: List[PooledCredential], active_sources:
     return True
 
 
-def _seed_custom_pool(pool_key: str, entries: List[PooledCredential]) -> Tuple[bool, Set[str]]:
+def _seed_custom_pool(
+    pool_key: str, entries: List[PooledCredential]
+) -> Tuple[bool, Set[str]]:
     """Seed a custom endpoint pool from custom_providers config and model config."""
     changed = False
     active_sources: Set[str] = set()
@@ -1358,6 +1513,9 @@ def load_pool(provider: str) -> CredentialPool:
     if changed:
         write_credential_pool(
             provider,
-            [entry.to_dict() for entry in sorted(entries, key=lambda item: item.priority)],
+            [
+                entry.to_dict()
+                for entry in sorted(entries, key=lambda item: item.priority)
+            ],
         )
     return CredentialPool(provider, entries)

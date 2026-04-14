@@ -3,22 +3,28 @@
 Exposes a small aiohttp server for the Hermes Agent 3DS client:
 - GET  /api/v2/health
 - GET  /api/v2/capabilities
+- GET  /api/v2/conversations
 - POST /api/v2/messages
+- POST /api/v2/image
 - POST /api/v2/voice
 - GET  /api/v2/events
+- GET  /api/v2/media/{media_id}
 - POST /api/v2/interactions/{request_id}/respond
 """
 
 from __future__ import annotations
 
 import asyncio
+from io import BytesIO
 import logging
 import os
+from pathlib import Path
 import queue
 import socket as _socket
 import time
 import uuid
 from typing import Any, Awaitable, Callable, Dict, Optional
+from urllib.parse import urlsplit
 
 try:
     from aiohttp import web
@@ -34,6 +40,8 @@ from gateway.platforms.base import (
     MessageEvent,
     MessageType,
     SendResult,
+    cache_image_from_bytes,
+    cache_image_from_url,
     cache_audio_from_bytes,
     is_network_accessible,
 )
@@ -51,6 +59,10 @@ INTERACTION_PAGE_ITEMS = 20
 SERVICE_NAME = "hermes-3ds-gateway"
 TRANSPORT_NAME = "http-long-poll"
 _STREAM_DONE = object()
+IMAGE_PREVIEW_MAX_WIDTH = 256
+IMAGE_PREVIEW_MAX_HEIGHT = 128
+MEDIA_CACHE_LIMIT = 64
+IMAGE_PREVIEW_CONTENT_TYPE = "image/bmp"
 
 
 class ThreeDSStreamConsumer:
@@ -173,6 +185,7 @@ class ThreeDSAdapter(BasePlatformAdapter):
         self._pending_interactions: dict[str, dict[str, Any]] = {}
         self._pending_stream_message_ids: dict[str, str] = {}
         self._last_status_event: dict[str, str] = {}
+        self._media: dict[str, dict[str, Any]] = {}
 
     async def connect(self) -> bool:
         if not AIOHTTP_AVAILABLE:
@@ -323,6 +336,195 @@ class ThreeDSAdapter(BasePlatformAdapter):
             }
         )
         return SendResult(success=True, message_id=f"status-{uuid.uuid4().hex[:12]}")
+
+    @staticmethod
+    def _image_ext_for_content_type(content_type: str) -> str:
+        lowered = (content_type or "").lower()
+        if "png" in lowered:
+            return ".png"
+        if "gif" in lowered:
+            return ".gif"
+        if "webp" in lowered:
+            return ".webp"
+        if "bmp" in lowered:
+            return ".bmp"
+        return ".jpg"
+
+    @staticmethod
+    def _read_bmp_dimensions(data: bytes) -> tuple[int, int]:
+        if len(data) < 26 or data[:2] != b"BM":
+            return 0, 0
+        width = int.from_bytes(data[18:22], "little", signed=True)
+        height = int.from_bytes(data[22:26], "little", signed=True)
+        return abs(width), abs(height)
+
+    def _remember_media(
+        self,
+        *,
+        path: str,
+        content_type: str,
+        width: int,
+        height: int,
+    ) -> str:
+        media_id = f"media-{uuid.uuid4().hex[:12]}"
+        self._media[media_id] = {
+            "path": path,
+            "content_type": content_type,
+            "width": width,
+            "height": height,
+        }
+        while len(self._media) > MEDIA_CACHE_LIMIT:
+            stale_media_id = next(iter(self._media))
+            stale = self._media.pop(stale_media_id, None)
+            stale_path = Path(str((stale or {}).get("path") or ""))
+            if stale_path.exists() and stale_path.name.startswith("img_"):
+                try:
+                    stale_path.unlink()
+                except OSError:
+                    pass
+        return media_id
+
+    def _prepare_preview_image(self, image_path: str) -> tuple[str, str, int, int]:
+        source_path = Path(image_path)
+        if not source_path.exists():
+            raise FileNotFoundError(f"Image file not found: {image_path}")
+
+        raw = source_path.read_bytes()
+        source_ext = source_path.suffix.lower() or ".jpg"
+        width, height = self._read_bmp_dimensions(raw)
+        if (
+            source_ext == ".bmp"
+            and 0 < width <= IMAGE_PREVIEW_MAX_WIDTH
+            and 0 < height <= IMAGE_PREVIEW_MAX_HEIGHT
+        ):
+            cached_path = cache_image_from_bytes(raw, ".bmp")
+            return cached_path, IMAGE_PREVIEW_CONTENT_TYPE, width, height
+
+        try:
+            from PIL import Image
+        except ImportError as exc:
+            raise RuntimeError(
+                "Pillow is required to transcode 3DS image previews unless the source is already a small BMP."
+            ) from exc
+
+        with Image.open(source_path) as image:
+            image = image.convert("RGB")
+            image.thumbnail(
+                (IMAGE_PREVIEW_MAX_WIDTH, IMAGE_PREVIEW_MAX_HEIGHT),
+                Image.Resampling.LANCZOS,
+            )
+            canvas = Image.new(
+                "RGB",
+                (IMAGE_PREVIEW_MAX_WIDTH, IMAGE_PREVIEW_MAX_HEIGHT),
+                (246, 243, 232),
+            )
+            offset_x = (IMAGE_PREVIEW_MAX_WIDTH - image.width) // 2
+            offset_y = (IMAGE_PREVIEW_MAX_HEIGHT - image.height) // 2
+            canvas.paste(image, (offset_x, offset_y))
+
+            encoded = BytesIO()
+            canvas.save(encoded, format="BMP")
+            cached_path = cache_image_from_bytes(encoded.getvalue(), ".bmp")
+            return (
+                cached_path,
+                IMAGE_PREVIEW_CONTENT_TYPE,
+                IMAGE_PREVIEW_MAX_WIDTH,
+                IMAGE_PREVIEW_MAX_HEIGHT,
+            )
+
+    async def send_image(
+        self,
+        chat_id: str,
+        image_url: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        try:
+            url_path = urlsplit(image_url).path
+            image_ext = Path(url_path).suffix.lower() or ".jpg"
+            cached_source = await cache_image_from_url(image_url, image_ext)
+            preview_path, content_type, width, height = self._prepare_preview_image(
+                cached_source
+            )
+        except Exception as exc:
+            return SendResult(success=False, error=str(exc))
+
+        return await self._enqueue_image_event(
+            chat_id=chat_id,
+            preview_path=preview_path,
+            content_type=content_type,
+            width=width,
+            height=height,
+            caption=caption,
+            reply_to=reply_to,
+            metadata=metadata,
+        )
+
+    async def send_image_file(
+        self,
+        chat_id: str,
+        image_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        **kwargs,
+    ) -> SendResult:
+        metadata = kwargs.get("metadata")
+        try:
+            preview_path, content_type, width, height = self._prepare_preview_image(
+                image_path
+            )
+        except Exception as exc:
+            return SendResult(success=False, error=str(exc))
+
+        return await self._enqueue_image_event(
+            chat_id=chat_id,
+            preview_path=preview_path,
+            content_type=content_type,
+            width=width,
+            height=height,
+            caption=caption,
+            reply_to=reply_to,
+            metadata=metadata,
+        )
+
+    async def _enqueue_image_event(
+        self,
+        *,
+        chat_id: str,
+        preview_path: str,
+        content_type: str,
+        width: int,
+        height: int,
+        caption: Optional[str],
+        reply_to: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+    ) -> SendResult:
+        device_id = self._device_id_from_chat_id(chat_id)
+        conversation_id = self._conversation_id_from_metadata(metadata)
+        message_id = f"assistant-{uuid.uuid4().hex[:12]}"
+        media_id = self._remember_media(
+            path=preview_path,
+            content_type=content_type,
+            width=width,
+            height=height,
+        )
+        await self._enqueue_event(
+            {
+                "device_id": device_id,
+                "conversation_id": conversation_id,
+                "session_key": self._session_key(device_id, conversation_id),
+                "type": "message.created",
+                "message_id": message_id,
+                "text": caption or "",
+                "reply_to": reply_to or "",
+                "media_id": media_id,
+                "media_type": content_type,
+                "media_width": width,
+                "media_height": height,
+            }
+        )
+        return SendResult(success=True, message_id=message_id)
 
     async def send_exec_approval(
         self,
@@ -599,8 +801,10 @@ class ThreeDSAdapter(BasePlatformAdapter):
         app.router.add_get("/api/v2/capabilities", self._handle_capabilities)
         app.router.add_get("/api/v2/conversations", self._handle_conversations)
         app.router.add_post("/api/v2/messages", self._handle_messages)
+        app.router.add_post("/api/v2/image", self._handle_image)
         app.router.add_post("/api/v2/voice", self._handle_voice)
         app.router.add_get("/api/v2/events", self._handle_events)
+        app.router.add_get("/api/v2/media/{media_id}", self._handle_media)
         app.router.add_post(
             "/api/v2/interactions/{request_id}/respond",
             self._handle_interaction_response,
@@ -1069,6 +1273,79 @@ class ThreeDSAdapter(BasePlatformAdapter):
             self._message_ack_payload(source, conversation_id, message_id, ack_cursor)
         )
 
+    async def _handle_image(self, request: "web.Request") -> "web.Response":
+        if not self._is_authorized(request):
+            return web.json_response(
+                {"ok": False, "error": "Unauthorized."}, status=401
+            )
+
+        device_id = (
+            request.query.get("device_id", "").strip() or self._default_device_id
+        )
+        conversation_id = request.query.get("conversation_id", "main").strip() or "main"
+        if not device_id:
+            return web.json_response(
+                {"ok": False, "error": "device_id is required."}, status=400
+            )
+
+        image_bytes = await request.read()
+        if not image_bytes:
+            return web.json_response(
+                {"ok": False, "error": "image body is required."}, status=400
+            )
+
+        content_type = request.content_type or "image/bmp"
+        source = self._session_source(device_id, conversation_id)
+        message_id = f"user-{uuid.uuid4().hex[:12]}"
+        ack_cursor = self._cursor
+
+        try:
+            cached_path = cache_image_from_bytes(
+                image_bytes,
+                ext=self._image_ext_for_content_type(content_type),
+            )
+        except ValueError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+        event = MessageEvent(
+            text="",
+            message_type=MessageType.PHOTO,
+            source=source,
+            message_id=message_id,
+            media_urls=[cached_path],
+            media_types=[content_type],
+        )
+        await self.handle_message(event)
+        return web.json_response(
+            self._message_ack_payload(source, conversation_id, message_id, ack_cursor)
+        )
+
+    async def _handle_media(self, request: "web.Request") -> "web.Response":
+        if not self._is_authorized(request):
+            return web.json_response(
+                {"ok": False, "error": "Unauthorized."}, status=401
+            )
+
+        media_id = request.match_info.get("media_id", "").strip()
+        media = self._media.get(media_id)
+        if media is None:
+            return web.json_response(
+                {"ok": False, "error": "Unknown media_id."}, status=404
+            )
+
+        media_path = Path(str(media.get("path") or ""))
+        if not media_path.exists():
+            self._media.pop(media_id, None)
+            return web.json_response(
+                {"ok": False, "error": "Media file is no longer available."},
+                status=404,
+            )
+
+        return web.Response(
+            body=media_path.read_bytes(),
+            content_type=str(media.get("content_type") or "application/octet-stream"),
+        )
+
     async def _handle_events(self, request: "web.Request") -> "web.Response":
         if not self._is_authorized(request):
             return web.json_response(
@@ -1137,6 +1414,15 @@ class ThreeDSAdapter(BasePlatformAdapter):
                     "text": event.get("text", ""),
                 }
             )
+            if event.get("media_id"):
+                payload.update(
+                    {
+                        "media_id": event.get("media_id", ""),
+                        "media_type": event.get("media_type", ""),
+                        "media_width": int(event.get("media_width", 0) or 0),
+                        "media_height": int(event.get("media_height", 0) or 0),
+                    }
+                )
         elif event["type"] == "status.updated":
             payload.update(
                 {

@@ -168,7 +168,9 @@ def test_random_strategy_uses_random_choice(tmp_path, monkeypatch):
     config_path = tmp_path / "hermes" / "config.yaml"
     config_path.write_text("credential_pool_strategies:\n  openrouter: random\n")
 
-    monkeypatch.setattr("agent.credential_pool.random.choice", lambda entries: entries[-1])
+    monkeypatch.setattr(
+        "agent.credential_pool.random.choice", lambda entries: entries[-1]
+    )
 
     from agent.credential_pool import load_pool
 
@@ -176,7 +178,6 @@ def test_random_strategy_uses_random_choice(tmp_path, monkeypatch):
     selected = pool.select()
     assert selected is not None
     assert selected.id == "cred-2"
-
 
 
 def test_exhausted_entry_resets_after_ttl(tmp_path, monkeypatch):
@@ -567,7 +568,9 @@ def test_singleton_seed_does_not_clobber_manual_oauth_entry(tmp_path, monkeypatc
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    monkeypatch.setattr("hermes_cli.auth.is_provider_explicitly_configured", lambda pid: True)
+    monkeypatch.setattr(
+        "hermes_cli.auth.is_provider_explicitly_configured", lambda pid: True
+    )
     _write_auth_store(
         tmp_path,
         {
@@ -611,7 +614,9 @@ def test_singleton_seed_does_not_clobber_manual_oauth_entry(tmp_path, monkeypatc
     assert {entry.source for entry in entries} == {"manual:hermes_pkce", "hermes_pkce"}
 
 
-def test_load_pool_prefers_anthropic_env_token_over_file_backed_oauth(tmp_path, monkeypatch):
+def test_load_pool_prefers_anthropic_env_token_over_file_backed_oauth(
+    tmp_path, monkeypatch
+):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("ANTHROPIC_TOKEN", "env-override-token")
@@ -825,15 +830,20 @@ def test_custom_endpoint_pool_seeds_from_config(tmp_path, monkeypatch):
     # Write config.yaml with a custom_providers entry
     config_path = tmp_path / "hermes" / "config.yaml"
     import yaml
-    config_path.write_text(yaml.dump({
-        "custom_providers": [
+
+    config_path.write_text(
+        yaml.dump(
             {
-                "name": "Together.ai",
-                "base_url": "https://api.together.ai/v1",
-                "api_key": "sk-config-seeded",
+                "custom_providers": [
+                    {
+                        "name": "Together.ai",
+                        "base_url": "https://api.together.ai/v1",
+                        "api_key": "sk-config-seeded",
+                    }
+                ]
             }
-        ]
-    }))
+        )
+    )
 
     from agent.credential_pool import load_pool
 
@@ -851,20 +861,25 @@ def test_custom_endpoint_pool_seeds_from_model_config(tmp_path, monkeypatch):
     _write_auth_store(tmp_path, {"version": 1})
 
     import yaml
+
     config_path = tmp_path / "hermes" / "config.yaml"
-    config_path.write_text(yaml.dump({
-        "custom_providers": [
+    config_path.write_text(
+        yaml.dump(
             {
-                "name": "Together.ai",
-                "base_url": "https://api.together.ai/v1",
+                "custom_providers": [
+                    {
+                        "name": "Together.ai",
+                        "base_url": "https://api.together.ai/v1",
+                    }
+                ],
+                "model": {
+                    "provider": "custom",
+                    "base_url": "https://api.together.ai/v1",
+                    "api_key": "sk-model-key",
+                },
             }
-        ],
-        "model": {
-            "provider": "custom",
-            "base_url": "https://api.together.ai/v1",
-            "api_key": "sk-model-key",
-        },
-    }))
+        )
+    )
 
     from agent.credential_pool import load_pool
 
@@ -897,28 +912,79 @@ def test_get_custom_provider_pool_key(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
     (tmp_path / "hermes").mkdir(parents=True, exist_ok=True)
     import yaml
+
     config_path = tmp_path / "hermes" / "config.yaml"
-    config_path.write_text(yaml.dump({
-        "custom_providers": [
+    config_path.write_text(
+        yaml.dump(
             {
-                "name": "Together.ai",
-                "base_url": "https://api.together.ai/v1",
-                "api_key": "sk-xxx",
-            },
-            {
-                "name": "My Local Server",
-                "base_url": "http://localhost:8080/v1",
-            },
-        ]
-    }))
+                "custom_providers": [
+                    {
+                        "name": "Together.ai",
+                        "base_url": "https://api.together.ai/v1",
+                        "api_key": "sk-xxx",
+                    },
+                    {
+                        "name": "My Local Server",
+                        "base_url": "http://localhost:8080/v1",
+                    },
+                ]
+            }
+        )
+    )
 
     from agent.credential_pool import get_custom_provider_pool_key
 
-    assert get_custom_provider_pool_key("https://api.together.ai/v1") == "custom:together.ai"
-    assert get_custom_provider_pool_key("https://api.together.ai/v1/") == "custom:together.ai"
-    assert get_custom_provider_pool_key("http://localhost:8080/v1") == "custom:my-local-server"
+    assert (
+        get_custom_provider_pool_key("https://api.together.ai/v1")
+        == "custom:together.ai"
+    )
+    assert (
+        get_custom_provider_pool_key("https://api.together.ai/v1/")
+        == "custom:together.ai"
+    )
+    assert (
+        get_custom_provider_pool_key("http://localhost:8080/v1")
+        == "custom:my-local-server"
+    )
     assert get_custom_provider_pool_key("https://unknown.example.com/v1") is None
     assert get_custom_provider_pool_key("") is None
+
+
+def test_get_custom_provider_pool_key_supports_providers_dict(tmp_path, monkeypatch):
+    """providers: dict entries should map to the same custom pool keys as legacy list entries."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    (tmp_path / "hermes").mkdir(parents=True, exist_ok=True)
+    import yaml
+
+    config_path = tmp_path / "hermes" / "config.yaml"
+    config_path.write_text(
+        yaml.dump(
+            {
+                "providers": {
+                    "openai-direct-primary": {
+                        "name": "OpenAI Direct (Primary)",
+                        "api": "https://api.openai.com/v1",
+                        "default_model": "gpt-5-mini",
+                        "key_env": "OPENAI_API_KEY",
+                    },
+                    "my-local-server": {
+                        "base_url": "http://localhost:8080/v1",
+                    },
+                }
+            }
+        )
+    )
+
+    from agent.credential_pool import get_custom_provider_pool_key
+
+    assert (
+        get_custom_provider_pool_key("https://api.openai.com/v1")
+        == "custom:openai-direct-(primary)"
+    )
+    assert (
+        get_custom_provider_pool_key("http://localhost:8080/v1")
+        == "custom:my-local-server"
+    )
 
 
 def test_list_custom_pool_providers(tmp_path, monkeypatch):
@@ -971,7 +1037,6 @@ def test_list_custom_pool_providers(tmp_path, monkeypatch):
     # "custom:empty" not included because it's empty
 
 
-
 def test_acquire_lease_prefers_unleased_entry(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
     _write_auth_store(
@@ -1013,7 +1078,6 @@ def test_acquire_lease_prefers_unleased_entry(tmp_path, monkeypatch):
     assert pool._active_leases.get("cred-2", 0) == 1
 
 
-
 def test_release_lease_decrements_counter(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
     _write_auth_store(
@@ -1046,7 +1110,9 @@ def test_release_lease_decrements_counter(tmp_path, monkeypatch):
     assert pool._active_leases.get("cred-1", 0) == 0
 
 
-def test_load_pool_does_not_seed_claude_code_when_anthropic_not_configured(tmp_path, monkeypatch):
+def test_load_pool_does_not_seed_claude_code_when_anthropic_not_configured(
+    tmp_path, monkeypatch
+):
     """Claude Code credentials must not be auto-seeded when the user never selected anthropic."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
     _write_auth_store(tmp_path, {"version": 1, "credential_pool": {}})
@@ -1054,7 +1120,11 @@ def test_load_pool_does_not_seed_claude_code_when_anthropic_not_configured(tmp_p
     # Claude Code credentials exist on disk
     monkeypatch.setattr(
         "agent.anthropic_adapter.read_claude_code_credentials",
-        lambda: {"accessToken": "sk-ant...oken", "refreshToken": "rt", "expiresAt": 9999999999999},
+        lambda: {
+            "accessToken": "sk-ant...oken",
+            "refreshToken": "rt",
+            "expiresAt": 9999999999999,
+        },
     )
     monkeypatch.setattr(
         "agent.anthropic_adapter.read_hermes_oauth_credentials",
@@ -1067,6 +1137,7 @@ def test_load_pool_does_not_seed_claude_code_when_anthropic_not_configured(tmp_p
     )
 
     from agent.credential_pool import load_pool
+
     pool = load_pool("anthropic")
 
     # Should NOT have seeded the claude_code entry

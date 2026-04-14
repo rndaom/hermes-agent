@@ -1,5 +1,6 @@
 import pytest
 from unittest.mock import patch
+from pathlib import Path
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
@@ -14,8 +15,10 @@ def _create_app(adapter):
     app.router.add_get("/api/v2/capabilities", adapter._handle_capabilities)
     app.router.add_get("/api/v2/conversations", adapter._handle_conversations)
     app.router.add_post("/api/v2/messages", adapter._handle_messages)
+    app.router.add_post("/api/v2/image", adapter._handle_image)
     app.router.add_post("/api/v2/voice", adapter._handle_voice)
     app.router.add_get("/api/v2/events", adapter._handle_events)
+    app.router.add_get("/api/v2/media/{media_id}", adapter._handle_media)
     app.router.add_post(
         "/api/v2/interactions/{request_id}/respond",
         adapter._handle_interaction_response,
@@ -39,6 +42,30 @@ def test_tools_config_and_prompt_hint_include_3ds():
     assert "3ds" in PLATFORM_HINTS
     assert "hermes-3ds" in TOOLSETS
     assert "hermes-3ds" in TOOLSETS["hermes-gateway"]["includes"]
+
+
+def test_gateway_cli_setup_registry_and_env_example_include_3ds():
+    from hermes_cli.gateway import _PLATFORMS
+
+    threeds_platform = next((p for p in _PLATFORMS if p["key"] == "3ds"), None)
+    assert threeds_platform is not None
+    assert threeds_platform["token_var"] == "THREEDS_ENABLED"
+
+    var_names = [v["name"] for v in threeds_platform["vars"]]
+    for key in [
+        "THREEDS_ENABLED",
+        "THREEDS_HOST",
+        "THREEDS_PORT",
+        "THREEDS_AUTH_TOKEN",
+        "THREEDS_DEVICE_ID",
+    ]:
+        assert key in var_names
+
+    env_example = (Path(__file__).resolve().parents[2] / ".env.example").read_text()
+    assert "THREEDS_ENABLED" in env_example
+    assert "THREEDS_HOST" in env_example
+    assert "THREEDS_PORT" in env_example
+    assert "THREEDS_AUTH_TOKEN" in env_example
 
 
 def test_load_gateway_config_env_override_enables_3ds(monkeypatch):
@@ -637,6 +664,92 @@ async def test_voice_upload_keeps_audio_file_available_after_http_ack():
     assert uploaded_path.exists(), (
         "voice upload file should remain available after request returns"
     )
+
+
+@pytest.mark.asyncio
+@patch("gateway.platforms.threeds.AIOHTTP_AVAILABLE", True)
+async def test_image_upload_creates_photo_message_event_with_image_attachment():
+    from gateway.platforms.threeds import ThreeDSAdapter
+    from gateway.platforms.base import MessageType
+
+    adapter = ThreeDSAdapter(PlatformConfig(enabled=True, extra={"auth_token": "***"}))
+    app = _create_app(adapter)
+    captured = {}
+
+    async def fake_handle_message(event):
+        captured["event"] = event
+
+    adapter.handle_message = fake_handle_message
+
+    async with TestClient(TestServer(app)) as cli:
+        resp = await cli.post(
+            "/api/v2/image?device_id=old3ds&conversation_id=main",
+            data=(
+                b"BM>\x00\x00\x00\x00\x00\x00\x006\x00\x00\x00(\x00\x00\x00"
+                b"\x02\x00\x00\x00\x01\x00\x00\x00\x01\x00\x18\x00\x00\x00\x00\x00"
+                b"\x08\x00\x00\x00\x13\x0b\x00\x00\x13\x0b\x00\x00\x00\x00\x00\x00"
+                b"\x00\x00\x00\x00\x00\x00\xff\x00\x00\x00\xff\x00\x00"
+            ),
+            headers={
+                "Authorization": "Bearer ***",
+                "Content-Type": "image/bmp",
+            },
+        )
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["ok"] is True
+        assert body["chat_id"] == "3ds:old3ds"
+        assert body["conversation_id"] == "main"
+
+    event = captured["event"]
+    assert event.message_type == MessageType.PHOTO
+    assert event.media_urls
+    assert event.media_types == ["image/bmp"]
+    assert event.source.chat_id == "3ds:old3ds"
+
+
+@pytest.mark.asyncio
+@patch("gateway.platforms.threeds.AIOHTTP_AVAILABLE", True)
+async def test_send_image_file_emits_media_event_and_serves_preview(tmp_path):
+    from gateway.platforms.threeds import ThreeDSAdapter
+
+    adapter = ThreeDSAdapter(PlatformConfig(enabled=True, extra={"auth_token": "tok"}))
+    image_path = tmp_path / "sample.bmp"
+    image_path.write_bytes(
+        b"BM>\x00\x00\x00\x00\x00\x00\x006\x00\x00\x00(\x00\x00\x00"
+        b"\x02\x00\x00\x00\x01\x00\x00\x00\x01\x00\x18\x00\x00\x00\x00\x00"
+        b"\x08\x00\x00\x00\x13\x0b\x00\x00\x13\x0b\x00\x00\x00\x00\x00\x00"
+        b"\x00\x00\x00\x00\x00\x00\xff\x00\x00\x00\xff\x00\x00"
+    )
+    app = _create_app(adapter)
+
+    async with TestClient(TestServer(app)) as cli:
+        result = await adapter.send_image_file(
+            chat_id="3ds:old3ds",
+            image_path=str(image_path),
+            caption="Look at this",
+            reply_to="user-123",
+            metadata={"thread_id": "main"},
+        )
+        assert result.success is True
+
+        poll = await cli.get(
+            "/api/v2/events?token=tok&device_id=old3ds&conversation_id=main&cursor=0&wait=1"
+        )
+        body = await poll.json()
+        event = body["event"]
+        assert event["type"] == "message.created"
+        assert event["reply_to"] == "user-123"
+        assert event["text"] == "Look at this"
+        assert event["media_id"].startswith("media-")
+        assert event["media_type"] == "image/bmp"
+        assert event["media_width"] == 2
+        assert event["media_height"] == 1
+
+        media_resp = await cli.get(f"/api/v2/media/{event['media_id']}?token=tok")
+        assert media_resp.status == 200
+        assert media_resp.headers["Content-Type"].startswith("image/bmp")
+        assert (await media_resp.read()).startswith(b"BM")
 
 
 @pytest.mark.asyncio
