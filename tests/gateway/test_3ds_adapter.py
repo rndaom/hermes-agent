@@ -389,6 +389,85 @@ async def test_partial_updates_emit_message_updated_before_final_created():
 
 @pytest.mark.asyncio
 @patch("gateway.platforms.threeds.AIOHTTP_AVAILABLE", True)
+async def test_status_updates_emit_deduped_status_updated_events():
+    from gateway.platforms.threeds import ThreeDSAdapter
+
+    adapter = ThreeDSAdapter(PlatformConfig(enabled=True, extra={"auth_token": "tok"}))
+    app = _create_app(adapter)
+
+    async with TestClient(TestServer(app)) as cli:
+        resp = await adapter.send_status_update(
+            chat_id="3ds:old3ds",
+            text="(^_^) pondering...",
+            phase="thinking",
+            metadata={"thread_id": "main"},
+        )
+        assert resp.success is True
+
+        duplicate = await adapter.send_status_update(
+            chat_id="3ds:old3ds",
+            text="(^_^) pondering...",
+            phase="thinking",
+            metadata={"thread_id": "main"},
+        )
+        assert duplicate.success is True
+
+        poll = await cli.get(
+            "/api/v2/events?token=tok&device_id=old3ds&conversation_id=main&cursor=0&wait=1"
+        )
+        body = await poll.json()
+        assert body["event"]["type"] == "status.updated"
+        assert body["event"]["phase"] == "thinking"
+        assert body["event"]["text"] == "(^_^) pondering..."
+
+        empty = await cli.get(
+            f"/api/v2/events?token=tok&device_id=old3ds&conversation_id=main&cursor={body['cursor']}&wait=1"
+        )
+        empty_body = await empty.json()
+        assert empty_body.get("event") in (None, {})
+
+
+@pytest.mark.asyncio
+@patch("gateway.platforms.threeds.AIOHTTP_AVAILABLE", True)
+async def test_large_message_events_keep_reply_to_ahead_of_text_for_small_clients():
+    from gateway.platforms.threeds import ThreeDSAdapter
+
+    adapter = ThreeDSAdapter(PlatformConfig(enabled=True, extra={"auth_token": "tok"}))
+    app = _create_app(adapter)
+
+    async with TestClient(TestServer(app)) as cli:
+        resp = await cli.post(
+            "/api/v2/messages",
+            json={
+                "token": "tok",
+                "device_id": "old3ds",
+                "conversation_id": "main",
+                "text": "/help",
+            },
+        )
+        ack = await resp.json()
+
+        large_text = "A" * 7000
+        await adapter.send(
+            chat_id="3ds:old3ds",
+            content=large_text,
+            reply_to=ack["message_id"],
+            metadata={"thread_id": "main"},
+        )
+
+        poll = await cli.get(
+            f"/api/v2/events?token=tok&device_id=old3ds&conversation_id=main&cursor={ack['cursor']}&wait=1"
+        )
+        body = await poll.json()
+        event = body["event"]
+        assert event["type"] == "message.created"
+        keys = list(event.keys())
+        assert keys.index("reply_to") < keys.index("text")
+        assert event["reply_to"] == ack["message_id"]
+
+
+@pytest.mark.asyncio
+@patch("gateway.platforms.threeds.AIOHTTP_AVAILABLE", True)
 async def test_conversations_endpoint_lists_current_device_conversations_only(tmp_path):
     from datetime import datetime, timedelta
 

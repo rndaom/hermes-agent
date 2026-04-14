@@ -170,6 +170,7 @@ class ThreeDSAdapter(BasePlatformAdapter):
         self._event_condition = asyncio.Condition()
         self._pending_interactions: dict[str, dict[str, Any]] = {}
         self._pending_stream_message_ids: dict[str, str] = {}
+        self._last_status_event: dict[str, str] = {}
 
     async def connect(self) -> bool:
         if not AIOHTTP_AVAILABLE:
@@ -284,6 +285,42 @@ class ThreeDSAdapter(BasePlatformAdapter):
             }
         )
         return SendResult(success=True, message_id=message_id)
+
+    async def send_status_update(
+        self,
+        chat_id: str,
+        text: str,
+        *,
+        phase: str = "thinking",
+        tool_name: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        device_id = self._device_id_from_chat_id(chat_id)
+        conversation_id = self._conversation_id_from_metadata(metadata)
+        session_key = self._session_key(device_id, conversation_id)
+        dedupe_key = f"{phase}:{tool_name}:{text}"
+
+        if not text:
+            return SendResult(success=False, error="status text is required")
+        if self._last_status_event.get(session_key) == dedupe_key:
+            return SendResult(success=True, message_id="status-deduped")
+
+        self._last_status_event[session_key] = dedupe_key
+        if len(self._last_status_event) > EVENT_QUEUE_LIMIT:
+            self._last_status_event.pop(next(iter(self._last_status_event)))
+
+        await self._enqueue_event(
+            {
+                "device_id": device_id,
+                "conversation_id": conversation_id,
+                "session_key": session_key,
+                "type": "status.updated",
+                "phase": phase,
+                "tool_name": tool_name,
+                "text": text,
+            }
+        )
+        return SendResult(success=True, message_id=f"status-{uuid.uuid4().hex[:12]}")
 
     async def send_exec_approval(
         self,
@@ -860,8 +897,16 @@ class ThreeDSAdapter(BasePlatformAdapter):
             payload.update(
                 {
                     "message_id": event.get("message_id", ""),
-                    "text": event.get("text", ""),
                     "reply_to": event.get("reply_to", ""),
+                    "text": event.get("text", ""),
+                }
+            )
+        elif event["type"] == "status.updated":
+            payload.update(
+                {
+                    "phase": event.get("phase", "thinking"),
+                    "tool_name": event.get("tool_name", ""),
+                    "text": event.get("text", ""),
                 }
             )
         elif event["type"] == "approval.request":

@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 import shlex
 import sys
@@ -8132,6 +8133,14 @@ class GatewayRunner:
             last_progress_msg[0] = msg
             repeat_count[0] = 0
 
+            if _threeds_activity_adapter:
+                _, working_faces, _ = _threeds_activity_faces()
+                _send_threeds_status_sync(
+                    f"{random.choice(working_faces)} {_threeds_tool_phrase(tool_name, preview)}",
+                    phase="tool",
+                    tool_name=tool_name or "",
+                )
+
             progress_queue.put(msg)
 
         # Background task to send progress messages
@@ -8356,6 +8365,138 @@ class GatewayRunner:
             except Exception as _e:
                 logger.debug("status_callback error (%s): %s", event_type, _e)
 
+        _threeds_activity_adapter = (
+            _status_adapter
+            if source.platform
+            and source.platform.value == "3ds"
+            and hasattr(_status_adapter, "send_status_update")
+            else None
+        )
+
+        def _threeds_activity_faces() -> tuple[list[str], list[str], list[str]]:
+            default_faces = ["(^_^)", "(^.^)", "(o_o)", "(-_-)", "(>_<)"]
+            default_working = ["(^_^)", "(^.^)", "(o_o)", "(^-^)"]
+            default_verbs = [
+                "pondering",
+                "contemplating",
+                "musing",
+                "processing",
+                "reasoning",
+            ]
+            safe_packs = {
+                "default": {
+                    "thinking": default_faces,
+                    "working": default_working,
+                },
+                "ares": {
+                    "thinking": ["(>_<)", "(o_o)", "(-_-)", "(^^)", "(! !)"],
+                    "working": ["(>_<)", "(^^)", "(o_o)", "(! !)"],
+                },
+                "poseidon": {
+                    "thinking": ["(~_~)", "(o_o)", "(^_^)", "(-_-)", "(._.)"],
+                    "working": ["(~_~)", "(^_^)", "(o_o)", "(._.)"],
+                },
+                "sisyphus": {
+                    "thinking": ["(-_-)", "(._.)", "(o_o)", "(--)", "(._.)"],
+                    "working": ["(-_-)", "(._.)", "(o_o)", "(--)"],
+                },
+                "charizard": {
+                    "thinking": ["(^_^)", "(>_<)", "(^o^)", "(o_o)", "(^^)"],
+                    "working": ["(^o^)", "(^_^)", "(>_<)", "(^^)"],
+                },
+            }
+
+            try:
+                from hermes_cli.skin_engine import get_active_skin, get_active_skin_name
+
+                skin = get_active_skin()
+                skin_name = get_active_skin_name()
+                verbs = skin.get_spinner_list("thinking_verbs") or default_verbs
+            except Exception:
+                skin_name = "default"
+                verbs = default_verbs
+
+            pack = safe_packs.get(skin_name, safe_packs["default"])
+            return pack["thinking"], pack["working"], verbs
+
+        def _threeds_tool_phrase(
+            tool_name: Optional[str], preview: Optional[str]
+        ) -> str:
+            phrases = {
+                "browser_navigate": "opening a page...",
+                "browser_snapshot": "grabbing a page snapshot...",
+                "browser_click": "clicking through...",
+                "browser_type": "typing into a page...",
+                "browser_press": "pressing page controls...",
+                "browser_scroll": "scrolling the page...",
+                "browser_back": "going back a page...",
+                "browser_get_images": "collecting images...",
+                "browser_vision": "looking over the page...",
+                "browser_console": "checking page logs...",
+                "web_search": "searching the web...",
+                "web_extract": "extracting a page...",
+                "read_file": "reading a file...",
+                "write_file": "writing a file...",
+                "patch": "patching a file...",
+                "search_files": "searching files...",
+                "terminal": "running a terminal command...",
+                "process": "checking a process...",
+                "todo": "planning tasks...",
+                "skills_list": "listing skills...",
+                "skill_view": "opening a skill...",
+                "skill_manage": "managing a skill...",
+                "memory": "updating memory...",
+                "session_search": "recalling a session...",
+                "execute_code": "running code...",
+                "delegate_task": "delegating a task...",
+                "cronjob": "handling a cron job...",
+                "clarify": "asking for clarification...",
+                "text_to_speech": "making audio...",
+                "image_generate": "drawing an image...",
+                "vision_analyze": "looking at an image...",
+                "send_message": "sending a message...",
+                "mixture_of_agents": "coordinating agents...",
+            }
+            phrase = phrases.get(tool_name or "", None)
+            if phrase is None:
+                label = (tool_name or "working").replace("_", " ")
+                phrase = f"{label}..."
+            if preview:
+                preview_text = str(preview)
+                if len(preview_text) > 26:
+                    preview_text = preview_text[:23] + "..."
+                phrase = f'{phrase[:-3]}: "{preview_text}"'
+            return phrase
+
+        def _send_threeds_status_sync(
+            text: str, *, phase: str = "thinking", tool_name: str = ""
+        ) -> None:
+            if not _threeds_activity_adapter or not str(text or "").strip():
+                return
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    _threeds_activity_adapter.send_status_update(
+                        _status_chat_id,
+                        text,
+                        phase=phase,
+                        tool_name=tool_name,
+                        metadata=_status_thread_metadata,
+                    ),
+                    _loop_for_step,
+                )
+            except Exception as _e:
+                logger.debug("3DS status update error: %s", _e)
+
+        def _thinking_callback_sync(text: str) -> None:
+            thinking_faces, _, thinking_verbs = _threeds_activity_faces()
+
+            if not str(text or "").strip():
+                return
+            _send_threeds_status_sync(
+                f"{random.choice(thinking_faces)} {random.choice(thinking_verbs)}...",
+                phase="thinking",
+            )
+
         def run_sync():
             # The conditional re-assignment of `message` further below
             # (prepending model-switch notes) makes Python treat it as a
@@ -8466,12 +8607,19 @@ class GatewayRunner:
                         if _want_threeds_partial_streaming:
                             from gateway.platforms.threeds import ThreeDSStreamConsumer
 
+                            _threeds_edit_interval = max(
+                                0.10, min(_scfg.edit_interval, 0.25)
+                            )
+                            _threeds_buffer_threshold = max(
+                                8, min(_scfg.buffer_threshold, 16)
+                            )
+
                             _stream_consumer = ThreeDSStreamConsumer(
                                 adapter=_adapter,
                                 chat_id=source.chat_id,
                                 reply_to=event_message_id,
-                                edit_interval=_scfg.edit_interval,
-                                buffer_threshold=_scfg.buffer_threshold,
+                                edit_interval=_threeds_edit_interval,
+                                buffer_threshold=_threeds_buffer_threshold,
                                 metadata={"thread_id": _progress_thread_id}
                                 if _progress_thread_id
                                 else None,
@@ -8587,6 +8735,9 @@ class GatewayRunner:
                 _step_callback_sync if _hooks_ref.loaded_hooks else None
             )
             agent.stream_delta_callback = _stream_delta_cb
+            agent.thinking_callback = (
+                _thinking_callback_sync if _threeds_activity_adapter else None
+            )
             agent.interim_assistant_callback = (
                 _interim_assistant_cb if _want_interim_messages else None
             )
