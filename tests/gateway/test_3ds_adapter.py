@@ -671,3 +671,128 @@ async def test_interaction_response_resolves_gateway_approval():
             mock_resolve.assert_called_once_with(
                 "agent:main:3ds:dm:3ds:old3ds:main", "session"
             )
+
+
+@pytest.mark.asyncio
+@patch("gateway.platforms.threeds.AIOHTTP_AVAILABLE", True)
+async def test_interaction_picker_emits_request_event_and_invokes_callback():
+    from gateway.platforms.threeds import ThreeDSAdapter
+
+    adapter = ThreeDSAdapter(PlatformConfig(enabled=True, extra={"auth_token": "tok"}))
+    captured: list[str] = []
+
+    async def on_choice(choice: str) -> None:
+        captured.append(choice)
+
+    app = _create_app(adapter)
+
+    async with TestClient(TestServer(app)) as cli:
+        result = await adapter.send_interaction_picker(
+            chat_id="3ds:old3ds",
+            title="Reasoning",
+            text="Choose a reasoning level.",
+            options=[
+                {"choice": f"choice-{index}", "label": f"Option {index}"}
+                for index in range(30)
+            ],
+            on_choice=on_choice,
+            metadata={"thread_id": "main"},
+            reply_to="user-123",
+        )
+        assert result.success is True
+
+        poll = await cli.get(
+            "/api/v2/events?token=tok&device_id=old3ds&conversation_id=main&cursor=0&wait=1"
+        )
+        body = await poll.json()
+        event = body["event"]
+        assert event["type"] == "interaction.request"
+        assert event["title"] == "Reasoning"
+        assert event["text"] == "Choose a reasoning level."
+        assert event["option_count"] == 24
+        assert event["choice_0"] == "choice-0"
+        assert event["label_23"] == "Option 23"
+
+        request_id = event["request_id"]
+        resp = await cli.post(
+            f"/api/v2/interactions/{request_id}/respond?token=tok",
+            json={"choice": "choice-0"},
+        )
+        assert resp.status == 200
+        response_body = await resp.json()
+        assert response_body["ok"] is True
+        assert captured == ["choice-0"]
+
+
+@pytest.mark.asyncio
+@patch("gateway.platforms.threeds.AIOHTTP_AVAILABLE", True)
+async def test_model_picker_emits_followup_picker_and_final_reply():
+    from gateway.platforms.threeds import ThreeDSAdapter
+
+    adapter = ThreeDSAdapter(PlatformConfig(enabled=True, extra={"auth_token": "tok"}))
+    chosen: list[tuple[str, str, str]] = []
+    providers = [
+        {
+            "slug": "openrouter",
+            "name": "OpenRouter",
+            "models": ["openai/gpt-5.4", "anthropic/claude-sonnet-4"],
+            "is_current": True,
+        }
+    ]
+
+    async def on_model_selected(chat_id: str, model_id: str, provider_slug: str) -> str:
+        chosen.append((chat_id, model_id, provider_slug))
+        return f"Switched to {model_id} via {provider_slug}"
+
+    app = _create_app(adapter)
+
+    async with TestClient(TestServer(app)) as cli:
+        result = await adapter.send_model_picker(
+            chat_id="3ds:old3ds",
+            providers=providers,
+            current_model="gpt-5.4",
+            current_provider="openrouter",
+            session_key="agent:main:3ds:dm:3ds:old3ds:main",
+            on_model_selected=on_model_selected,
+            metadata={"thread_id": "main"},
+            reply_to="user-999",
+        )
+        assert result.success is True
+
+        poll1 = await cli.get(
+            "/api/v2/events?token=tok&device_id=old3ds&conversation_id=main&cursor=0&wait=1"
+        )
+        body1 = await poll1.json()
+        provider_event = body1["event"]
+        assert provider_event["type"] == "interaction.request"
+        assert provider_event["choice_0"] == "provider:0"
+
+        resp1 = await cli.post(
+            f"/api/v2/interactions/{provider_event['request_id']}/respond?token=tok",
+            json={"choice": "provider:0"},
+        )
+        assert resp1.status == 200
+
+        poll2 = await cli.get(
+            f"/api/v2/events?token=tok&device_id=old3ds&conversation_id=main&cursor={body1['cursor']}&wait=1"
+        )
+        body2 = await poll2.json()
+        model_event = body2["event"]
+        assert model_event["type"] == "interaction.request"
+        assert model_event["choice_0"] == "model:0:0"
+
+        resp2 = await cli.post(
+            f"/api/v2/interactions/{model_event['request_id']}/respond?token=tok",
+            json={"choice": "model:0:1"},
+        )
+        assert resp2.status == 200
+
+        poll3 = await cli.get(
+            f"/api/v2/events?token=tok&device_id=old3ds&conversation_id=main&cursor={body2['cursor']}&wait=1"
+        )
+        body3 = await poll3.json()
+        final_event = body3["event"]
+        assert final_event["type"] == "message.created"
+        assert final_event["reply_to"] == "user-999"
+        assert "anthropic/claude-sonnet-4" in final_event["text"]
+        assert chosen == [("3ds:old3ds", "anthropic/claude-sonnet-4", "openrouter")]

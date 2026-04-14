@@ -18,7 +18,7 @@ import queue
 import socket as _socket
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 try:
     from aiohttp import web
@@ -46,6 +46,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 EVENT_QUEUE_LIMIT = 1000
+INTERACTION_OPTION_LIMIT = 24
+INTERACTION_PAGE_ITEMS = 20
 SERVICE_NAME = "hermes-3ds-gateway"
 TRANSPORT_NAME = "http-long-poll"
 _STREAM_DONE = object()
@@ -353,6 +355,240 @@ class ThreeDSAdapter(BasePlatformAdapter):
             }
         )
         return SendResult(success=True, message_id=request_id)
+
+    async def send_interaction_picker(
+        self,
+        chat_id: str,
+        title: str,
+        text: str,
+        options: list[dict[str, str]],
+        on_choice: Callable[[str], Awaitable[None]],
+        metadata: Optional[Dict[str, Any]] = None,
+        reply_to: Optional[str] = None,
+    ) -> SendResult:
+        device_id = self._device_id_from_chat_id(chat_id)
+        conversation_id = self._conversation_id_from_metadata(metadata)
+        request_id = f"interaction-{uuid.uuid4().hex[:12]}"
+        clean_options: list[dict[str, str]] = []
+        option: dict[str, str]
+
+        for option in options[:INTERACTION_OPTION_LIMIT]:
+            choice = str(option.get("choice", "")).strip()
+            label = str(option.get("label", "")).strip()
+            if not choice:
+                continue
+            clean_options.append({"choice": choice, "label": label or choice})
+
+        if not clean_options:
+            return SendResult(
+                success=False, error="interaction picker needs at least one option"
+            )
+
+        self._pending_interactions[request_id] = {
+            "kind": "picker",
+            "device_id": device_id,
+            "conversation_id": conversation_id,
+            "session_key": self._session_key(device_id, conversation_id),
+            "chat_id": chat_id,
+            "reply_to": reply_to or "",
+            "metadata": metadata or {},
+            "choices": {item["choice"] for item in clean_options},
+            "on_choice": on_choice,
+        }
+
+        event: dict[str, Any] = {
+            "device_id": device_id,
+            "conversation_id": conversation_id,
+            "session_key": self._session_key(device_id, conversation_id),
+            "type": "interaction.request",
+            "request_id": request_id,
+            "title": title,
+            "text": text,
+            "option_count": len(clean_options),
+        }
+        for index, item in enumerate(clean_options):
+            event[f"choice_{index}"] = item["choice"]
+            event[f"label_{index}"] = item["label"]
+
+        await self._enqueue_event(event)
+        return SendResult(success=True, message_id=request_id)
+
+    async def send_model_picker(
+        self,
+        chat_id: str,
+        providers: list,
+        current_model: str,
+        current_provider: str,
+        session_key: str,
+        on_model_selected,
+        metadata: Optional[Dict[str, Any]] = None,
+        reply_to: Optional[str] = None,
+    ) -> SendResult:
+        page_size = INTERACTION_PAGE_ITEMS
+
+        def _short_label(text: str, max_len: int = 18) -> str:
+            value = str(text or "").strip() or "Option"
+            return value if len(value) <= max_len else value[: max_len - 3] + "..."
+
+        async def _send_provider_page(page: int) -> None:
+            start = max(page, 0) * page_size
+            page_items = providers[start : start + page_size]
+            options: list[dict[str, str]] = [
+                {
+                    "choice": f"provider:{start + index}",
+                    "label": _short_label(
+                        item.get("name", item.get("slug", "provider"))
+                    ),
+                }
+                for index, item in enumerate(page_items)
+            ]
+            if start > 0:
+                options.append({"choice": f"provider-page:{page - 1}", "label": "Prev"})
+            if start + page_size < len(providers):
+                options.append({"choice": f"provider-page:{page + 1}", "label": "Next"})
+            options.append({"choice": "cancel", "label": "Cancel"})
+
+            async def _on_provider_choice(choice: str) -> None:
+                if choice == "cancel":
+                    return
+                if choice.startswith("provider-page:"):
+                    await _send_provider_page(int(choice.split(":", 1)[1]))
+                    return
+                if not choice.startswith("provider:"):
+                    await self.send(
+                        chat_id,
+                        "Model picker received an unknown provider choice.",
+                        reply_to=reply_to,
+                        metadata=metadata,
+                    )
+                    return
+
+                provider_index = int(choice.split(":", 1)[1])
+                if provider_index < 0 or provider_index >= len(providers):
+                    await self.send(
+                        chat_id,
+                        "That provider is no longer available.",
+                        reply_to=reply_to,
+                        metadata=metadata,
+                    )
+                    return
+                await _send_model_page(provider_index, 0)
+
+            await self.send_interaction_picker(
+                chat_id=chat_id,
+                title="Model picker",
+                text=(
+                    f"Current model: {current_model or 'unknown'} on {current_provider}. "
+                    f"Select a provider ({start + 1}-{start + len(page_items)} of {len(providers)})."
+                ),
+                options=options,
+                on_choice=_on_provider_choice,
+                metadata=metadata,
+                reply_to=reply_to,
+            )
+
+        async def _send_model_page(provider_index: int, page: int) -> None:
+            provider = providers[provider_index]
+            models = provider.get("models", [])
+            start = max(page, 0) * page_size
+            page_items = models[start : start + page_size]
+            options: list[dict[str, str]] = [
+                {
+                    "choice": f"model:{provider_index}:{start + index}",
+                    "label": _short_label(
+                        model.split("/")[-1] if "/" in model else model
+                    ),
+                }
+                for index, model in enumerate(page_items)
+            ]
+            if start > 0:
+                options.append(
+                    {
+                        "choice": f"model-page:{provider_index}:{page - 1}",
+                        "label": "Prev",
+                    }
+                )
+            if start + page_size < len(models):
+                options.append(
+                    {
+                        "choice": f"model-page:{provider_index}:{page + 1}",
+                        "label": "Next",
+                    }
+                )
+            options.append({"choice": f"model-back:{provider_index}", "label": "Back"})
+            options.append({"choice": "cancel", "label": "Cancel"})
+
+            async def _on_model_choice(choice: str) -> None:
+                if choice == "cancel":
+                    return
+                if choice.startswith("model-back:"):
+                    await _send_provider_page(0)
+                    return
+                if choice.startswith("model-page:"):
+                    _, _, new_page = choice.split(":", 2)
+                    await _send_model_page(provider_index, int(new_page))
+                    return
+                if not choice.startswith("model:"):
+                    await self.send(
+                        chat_id,
+                        "Model picker received an unknown model choice.",
+                        reply_to=reply_to,
+                        metadata=metadata,
+                    )
+                    return
+
+                _, raw_provider_index, raw_model_index = choice.split(":", 2)
+                selected_provider_index = int(raw_provider_index)
+                selected_model_index = int(raw_model_index)
+                if (
+                    selected_provider_index != provider_index
+                    or selected_model_index < 0
+                    or selected_model_index >= len(models)
+                ):
+                    await self.send(
+                        chat_id,
+                        "That model is no longer available.",
+                        reply_to=reply_to,
+                        metadata=metadata,
+                    )
+                    return
+
+                result_text = await on_model_selected(
+                    chat_id, models[selected_model_index], provider.get("slug", "")
+                )
+                await self.send(
+                    chat_id, result_text, reply_to=reply_to, metadata=metadata
+                )
+
+            if not models:
+                await self.send(
+                    chat_id,
+                    "That provider has no selectable models right now.",
+                    reply_to=reply_to,
+                    metadata=metadata,
+                )
+                return
+
+            await self.send_interaction_picker(
+                chat_id=chat_id,
+                title="Model picker",
+                text=(
+                    f"{provider.get('name', provider.get('slug', 'provider'))}: "
+                    f"choose a model ({start + 1}-{start + len(page_items)} of {len(models)})."
+                ),
+                options=options,
+                on_choice=_on_model_choice,
+                metadata=metadata,
+                reply_to=reply_to,
+            )
+
+        if not providers:
+            return SendResult(success=False, error="No model providers available")
+
+        await _send_provider_page(0)
+        return SendResult(
+            success=True, message_id=f"model-picker-{uuid.uuid4().hex[:12]}"
+        )
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         return {"name": chat_id, "type": "dm"}
@@ -917,6 +1153,18 @@ class ThreeDSAdapter(BasePlatformAdapter):
                     "description": event.get("description", "dangerous command"),
                 }
             )
+        elif event["type"] == "interaction.request":
+            payload.update(
+                {
+                    "request_id": event.get("request_id", ""),
+                    "title": event.get("title", ""),
+                    "text": event.get("text", ""),
+                    "option_count": event.get("option_count", 0),
+                }
+            )
+            for index in range(int(event.get("option_count", 0) or 0)):
+                payload[f"choice_{index}"] = event.get(f"choice_{index}", "")
+                payload[f"label_{index}"] = event.get(f"label_{index}", "")
         elif event["type"] == "approval.resolved":
             payload.update(
                 {
@@ -942,29 +1190,51 @@ class ThreeDSAdapter(BasePlatformAdapter):
                 {"ok": False, "error": "Unauthorized."}, status=401
             )
 
-        choice = str(payload.get("choice", "")).strip().lower()
-        if choice not in {"once", "session", "always", "deny"}:
-            return web.json_response(
-                {"ok": False, "error": "Invalid choice."}, status=400
-            )
+        choice = str(payload.get("choice", "")).strip()
 
-        pending = self._pending_interactions.pop(request_id, None)
+        pending = self._pending_interactions.get(request_id)
         if pending is None:
             return web.json_response(
                 {"ok": False, "error": "Unknown request_id."}, status=404
             )
 
-        resolve_gateway_approval(pending["session_key"], choice)
-        await self._enqueue_event(
-            {
-                "device_id": pending["device_id"],
-                "conversation_id": pending["conversation_id"],
-                "session_key": pending["session_key"],
-                "type": "approval.resolved",
-                "request_id": request_id,
-                "choice": choice,
-            }
-        )
+        if pending.get("kind") == "picker":
+            if choice not in pending.get("choices", set()):
+                return web.json_response(
+                    {"ok": False, "error": "Invalid choice."}, status=400
+                )
+            self._pending_interactions.pop(request_id, None)
+            try:
+                await pending["on_choice"](choice)
+            except Exception as exc:
+                logger.warning("[3DS] Picker callback failed: %s", exc)
+                reply_to = pending.get("reply_to") or None
+                metadata = pending.get("metadata") or None
+                await self.send(
+                    pending["chat_id"],
+                    f"Picker action failed: {exc}",
+                    reply_to=reply_to,
+                    metadata=metadata,
+                )
+        else:
+            choice = choice.lower()
+            if choice not in {"once", "session", "always", "deny"}:
+                return web.json_response(
+                    {"ok": False, "error": "Invalid choice."}, status=400
+                )
+
+            self._pending_interactions.pop(request_id, None)
+            resolve_gateway_approval(pending["session_key"], choice)
+            await self._enqueue_event(
+                {
+                    "device_id": pending["device_id"],
+                    "conversation_id": pending["conversation_id"],
+                    "session_key": pending["session_key"],
+                    "type": "approval.resolved",
+                    "request_id": request_id,
+                    "choice": choice,
+                }
+            )
         return web.json_response(
             {"ok": True, "request_id": request_id, "choice": choice}
         )

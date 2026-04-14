@@ -4750,6 +4750,90 @@ class GatewayRunner:
             )
         return "\n".join(lines)
 
+    async def _send_threeds_picker(
+        self,
+        event: MessageEvent,
+        title: str,
+        text: str,
+        options: list[dict[str, str]],
+        on_choice,
+    ) -> bool:
+        adapter = self.adapters.get(event.source.platform)
+
+        if not (
+            event.source.platform
+            and event.source.platform.value == "3ds"
+            and adapter is not None
+            and getattr(type(adapter), "send_interaction_picker", None) is not None
+        ):
+            return False
+
+        metadata = (
+            {"thread_id": event.source.thread_id} if event.source.thread_id else None
+        )
+        result = await adapter.send_interaction_picker(
+            chat_id=event.source.chat_id,
+            title=title,
+            text=text,
+            options=options,
+            on_choice=on_choice,
+            metadata=metadata,
+            reply_to=event.message_id,
+        )
+        return bool(result.success)
+
+    async def _send_threeds_paged_picker(
+        self,
+        event: MessageEvent,
+        title: str,
+        text: str,
+        items: list[tuple[str, str]],
+        on_select,
+        page: int = 0,
+    ) -> bool:
+        adapter = self.adapters.get(event.source.platform)
+        page_size = 20
+        start = max(page, 0) * page_size
+        page_items = items[start : start + page_size]
+        options: list[dict[str, str]] = [
+            {"choice": f"pick:{start + index}", "label": label}
+            for index, (_, label) in enumerate(page_items)
+        ]
+
+        if not page_items:
+            return False
+        if start > 0:
+            options.append({"choice": f"page:{page - 1}", "label": "Prev"})
+        if start + page_size < len(items):
+            options.append({"choice": f"page:{page + 1}", "label": "Next"})
+        options.append({"choice": "cancel", "label": "Cancel"})
+
+        async def _on_choice(choice: str) -> None:
+            if choice == "cancel":
+                return
+            if choice.startswith("page:"):
+                await self._send_threeds_paged_picker(
+                    event,
+                    title,
+                    text,
+                    items,
+                    on_select,
+                    page=int(choice.split(":", 1)[1]),
+                )
+                return
+            if choice.startswith("pick:"):
+                index = int(choice.split(":", 1)[1])
+                if 0 <= index < len(items):
+                    await on_select(items[index][0])
+
+        return await self._send_threeds_picker(
+            event,
+            title,
+            f"{text} ({start + 1}-{start + len(page_items)} of {len(items)})",
+            options,
+            _on_choice,
+        )
+
     async def _handle_model_command(self, event: MessageEvent) -> Optional[str]:
         """Handle /model command — switch model for this session.
 
@@ -4917,15 +5001,18 @@ class GatewayRunner:
                     metadata = (
                         {"thread_id": source.thread_id} if source.thread_id else None
                     )
-                    result = await adapter.send_model_picker(
-                        chat_id=source.chat_id,
-                        providers=providers,
-                        current_model=current_model,
-                        current_provider=current_provider,
-                        session_key=session_key,
-                        on_model_selected=_on_model_selected,
-                        metadata=metadata,
-                    )
+                    picker_kwargs = {
+                        "chat_id": source.chat_id,
+                        "providers": providers,
+                        "current_model": current_model,
+                        "current_provider": current_provider,
+                        "session_key": session_key,
+                        "on_model_selected": _on_model_selected,
+                        "metadata": metadata,
+                    }
+                    if source.platform and source.platform.value == "3ds":
+                        picker_kwargs["reply_to"] = event.message_id
+                    result = await adapter.send_model_picker(**picker_kwargs)
                     if result.success:
                         return None  # Picker sent — adapter handles the response
 
@@ -5170,6 +5257,42 @@ class GatewayRunner:
             return "No personalities configured in `~/.hermes/config.yaml`"
 
         if not args:
+            if event.source.platform and event.source.platform.value == "3ds":
+                items = [("none", "None")]
+                items.extend(
+                    (name, name if len(name) <= 18 else name[:15] + "...")
+                    for name in personalities.keys()
+                )
+
+                async def _on_personality_choice(choice_name: str) -> None:
+                    adapter = self.adapters.get(event.source.platform)
+                    metadata = (
+                        {"thread_id": event.source.thread_id}
+                        if event.source.thread_id
+                        else None
+                    )
+                    choice_event = MessageEvent(
+                        text=f"/personality {choice_name}",
+                        source=event.source,
+                        message_id=event.message_id,
+                    )
+                    result = await self._handle_personality_command(choice_event)
+                    await adapter.send(
+                        event.source.chat_id,
+                        result,
+                        reply_to=event.message_id,
+                        metadata=metadata,
+                    )
+
+                if await self._send_threeds_paged_picker(
+                    event,
+                    "Personality",
+                    "Select a personality overlay for this session.",
+                    items,
+                    _on_personality_choice,
+                ):
+                    return None
+
             lines = ["🎭 **Available Personalities**\n"]
             lines.append("• `none` — (no personality overlay)")
             for name, prompt in personalities.items():
@@ -5782,6 +5905,51 @@ class GatewayRunner:
 
         if not arg:
             checkpoints = mgr.list_checkpoints(cwd)
+            if (
+                checkpoints
+                and event.source.platform
+                and event.source.platform.value == "3ds"
+            ):
+                items = []
+                for index, checkpoint in enumerate(checkpoints[:24], start=1):
+                    label = (
+                        checkpoint.get("reason")
+                        or checkpoint.get("hash")
+                        or f"Checkpoint {index}"
+                    )
+                    if len(label) > 18:
+                        label = label[:15] + "..."
+                    items.append((checkpoint.get("hash", ""), f"{index}. {label}"))
+
+                async def _on_rollback_choice(target_hash: str) -> None:
+                    adapter = self.adapters.get(event.source.platform)
+                    metadata = (
+                        {"thread_id": event.source.thread_id}
+                        if event.source.thread_id
+                        else None
+                    )
+                    choice_event = MessageEvent(
+                        text=f"/rollback {target_hash}",
+                        source=event.source,
+                        message_id=event.message_id,
+                    )
+                    result = await self._handle_rollback_command(choice_event)
+                    await adapter.send(
+                        event.source.chat_id,
+                        result,
+                        reply_to=event.message_id,
+                        metadata=metadata,
+                    )
+
+                if await self._send_threeds_paged_picker(
+                    event,
+                    "Rollback",
+                    f"Select a checkpoint to restore from {cwd}.",
+                    items,
+                    _on_rollback_choice,
+                ):
+                    return None
+
             return format_checkpoint_list(checkpoints, cwd)
 
         # Restore by number or hash
@@ -6568,6 +6736,42 @@ class GatewayRunner:
                         "Use `/title My Session` to name your current session, "
                         "then `/resume My Session` to return to it later."
                     )
+                if source.platform and source.platform.value == "3ds":
+                    items = []
+                    for session in titled[:24]:
+                        title = session["title"]
+                        label = title if len(title) <= 18 else title[:15] + "..."
+                        items.append((title, label))
+
+                    async def _on_resume_choice(session_title: str) -> None:
+                        adapter = self.adapters.get(source.platform)
+                        metadata = (
+                            {"thread_id": source.thread_id}
+                            if source.thread_id
+                            else None
+                        )
+                        choice_event = MessageEvent(
+                            text=f"/resume {session_title}",
+                            source=source,
+                            message_id=event.message_id,
+                        )
+                        result = await self._handle_resume_command(choice_event)
+                        await adapter.send(
+                            source.chat_id,
+                            result,
+                            reply_to=event.message_id,
+                            metadata=metadata,
+                        )
+
+                    if await self._send_threeds_paged_picker(
+                        event,
+                        "Resume session",
+                        "Select one of your named sessions.",
+                        items,
+                        _on_resume_choice,
+                    ):
+                        return None
+
                 lines = ["📋 **Named Sessions**\n"]
                 for s in titled[:10]:
                     title = s["title"]
