@@ -1,0 +1,131 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1920" y2="1080" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#060708"/>
+      <stop offset="0.52" stop-color="#0A0C10"/>
+      <stop offset="1" stop-color="#141218"/>
+    </linearGradient>
+    <radialGradient id="roseBloom" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1180 515) rotate(4.2) scale(720 420)">
+      <stop offset="0" stop-color="#C49AA4" stop-opacity="0.16"/>
+      <stop offset="0.48" stop-color="#855F69" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#855F69" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="plane" x1="960" y1="280" x2="960" y2="860" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1A171B" stop-opacity="0"/>
+      <stop offset="0.45" stop-color="#231D23" stop-opacity="0.48"/>
+      <stop offset="1" stop-color="#0E1014" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="dieAFront" x1="870" y1="416" x2="1115" y2="652" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#181C20"/>
+      <stop offset="0.55" stop-color="#0D1014"/>
+      <stop offset="1" stop-color="#07090C"/>
+    </linearGradient>
+    <linearGradient id="dieATop" x1="870" y1="416" x2="1030" y2="332" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#262A2E"/>
+      <stop offset="0.6" stop-color="#12161A"/>
+      <stop offset="1" stop-color="#0A0D10"/>
+    </linearGradient>
+    <linearGradient id="dieASide" x1="1115" y1="418" x2="1248" y2="592" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#14171B"/>
+      <stop offset="1" stop-color="#06080A"/>
+    </linearGradient>
+    <linearGradient id="dieBFront" x1="1210" y1="546" x2="1406" y2="756" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#161A1E"/>
+      <stop offset="0.6" stop-color="#0C0F13"/>
+      <stop offset="1" stop-color="#05070A"/>
+    </linearGradient>
+    <linearGradient id="dieBTop" x1="1210" y1="546" x2="1342" y2="476" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#23282D"/>
+      <stop offset="0.65" stop-color="#12161A"/>
+      <stop offset="1" stop-color="#090B0E"/>
+    </linearGradient>
+    <linearGradient id="dieBSide" x1="1406" y1="548" x2="1512" y2="710" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#13161A"/>
+      <stop offset="1" stop-color="#06080A"/>
+    </linearGradient>
+    <linearGradient id="roseEdge" x1="980" y1="360" x2="1518" y2="768" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F0C5CE" stop-opacity="0.8"/>
+      <stop offset="0.45" stop-color="#A97783" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#A97783" stop-opacity="0.02"/>
+    </linearGradient>
+    <filter id="blurBig" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="42"/>
+    </filter>
+    <filter id="blurSoft" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="18"/>
+    </filter>
+    <filter id="grain" x="-20%" y="-20%" width="140%" height="140%" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.72" numOctaves="2" seed="7" stitchTiles="stitch"/>
+      <feColorMatrix type="saturate" values="0"/>
+      <feComponentTransfer>
+        <feFuncA type="table" tableValues="0 0.028"/>
+      </feComponentTransfer>
+    </filter>
+  </defs>
+
+  <rect width="1920" height="1080" fill="url(#bg)"/>
+  <rect width="1920" height="1080" fill="url(#roseBloom)"/>
+
+  <g opacity="0.16">
+    <path d="M0 726C338 668 620 656 935 696C1214 731 1565 836 1920 1032V1080H0V726Z" fill="#121418"/>
+    <path d="M0 792C318 742 654 736 965 772C1238 804 1586 892 1920 1080H0V792Z" fill="#090B0E"/>
+  </g>
+
+  <rect x="948" y="252" width="144" height="576" fill="url(#plane)" opacity="0.5"/>
+  <rect x="1018" y="252" width="2" height="576" fill="#DAB3BD" fill-opacity="0.42"/>
+  <rect x="1023" y="252" width="1" height="576" fill="#FFFFFF" fill-opacity="0.16"/>
+
+  <ellipse cx="1088" cy="726" rx="202" ry="54" fill="#000000" fill-opacity="0.34" filter="url(#blurSoft)"/>
+  <ellipse cx="1386" cy="836" rx="174" ry="48" fill="#000000" fill-opacity="0.34" filter="url(#blurSoft)"/>
+  <ellipse cx="1242" cy="642" rx="286" ry="120" fill="#B78995" fill-opacity="0.08" filter="url(#blurBig)"/>
+
+  <g>
+    <polygon points="872,416 1037,338 1198,432 1033,510" fill="url(#dieATop)"/>
+    <polygon points="1033,510 1198,432 1198,620 1033,699" fill="url(#dieASide)"/>
+    <polygon points="872,416 1033,510 1033,699 872,606" fill="url(#dieAFront)"/>
+    <path d="M872 416L1037 338L1198 432" stroke="url(#roseEdge)" stroke-width="2.2"/>
+    <path d="M1033 510L1198 432L1198 620" stroke="#E6C0C8" stroke-opacity="0.24" stroke-width="1.8"/>
+    <path d="M872 416L1033 510L1033 699" stroke="#FFFFFF" stroke-opacity="0.13" stroke-width="1.2"/>
+  </g>
+
+  <g fill="#F5F6F8">
+    <circle cx="922" cy="472" r="13"/>
+    <circle cx="981" cy="556" r="13"/>
+    <circle cx="922" cy="640" r="13"/>
+    <circle cx="981" cy="472" r="13"/>
+    <circle cx="922" cy="556" r="13"/>
+  </g>
+
+  <g fill="#F3F5F7">
+    <circle cx="1104" cy="494" r="11"/>
+    <circle cx="1128" cy="562" r="11"/>
+  </g>
+
+  <g>
+    <polygon points="1206,548 1341,482 1476,560 1341,626" fill="url(#dieBTop)"/>
+    <polygon points="1341,626 1476,560 1476,722 1341,788" fill="url(#dieBSide)"/>
+    <polygon points="1206,548 1341,626 1341,788 1206,710" fill="url(#dieBFront)"/>
+    <path d="M1206 548L1341 482L1476 560" stroke="url(#roseEdge)" stroke-width="2"/>
+    <path d="M1341 626L1476 560L1476 722" stroke="#E5BFC7" stroke-opacity="0.22" stroke-width="1.7"/>
+    <path d="M1206 548L1341 626L1341 788" stroke="#FFFFFF" stroke-opacity="0.11" stroke-width="1.1"/>
+  </g>
+
+  <g fill="#F4F5F7">
+    <circle cx="1252" cy="604" r="11"/>
+    <circle cx="1296" cy="669" r="11"/>
+    <circle cx="1252" cy="734" r="11"/>
+  </g>
+
+  <g fill="#F1F3F5">
+    <circle cx="1388" cy="608" r="10"/>
+    <circle cx="1430" cy="640" r="10"/>
+    <circle cx="1388" cy="674" r="10"/>
+  </g>
+
+  <g opacity="0.34" filter="url(#blurSoft)">
+    <path d="M1065 308L1192 382" stroke="#D0A2AE" stroke-width="8" stroke-linecap="square"/>
+    <path d="M1433 514L1497 552" stroke="#D0A2AE" stroke-width="7" stroke-linecap="square"/>
+  </g>
+
+  <rect width="1920" height="1080" filter="url(#grain)" opacity="0.9"/>
+</svg>

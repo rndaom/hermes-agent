@@ -87,6 +87,23 @@ async def test_registers_native_thread_slash_command(adapter):
     adapter._handle_thread_create_slash.assert_awaited_once_with(interaction, "Planning", "", 1440)
 
 
+def test_register_slash_commands_logs_skill_cap_as_info(adapter):
+    adapter._client.tree.get_commands = lambda: []
+    with (
+        patch("hermes_cli.commands.discord_skill_commands", return_value=([], 3)),
+        patch("gateway.platforms.discord.logger") as mock_logger,
+    ):
+        adapter._register_slash_commands()
+
+    mock_logger.info.assert_any_call(
+        "[%s] Discord slash command limit reached (%d): %d skill(s) not registered",
+        adapter.name,
+        100,
+        3,
+    )
+    mock_logger.warning.assert_not_called()
+
+
 # ------------------------------------------------------------------
 # _handle_thread_create_slash — success, session dispatch, failure
 # ------------------------------------------------------------------

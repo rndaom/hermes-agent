@@ -358,6 +358,29 @@ class ThreeDSAdapter(BasePlatformAdapter):
         height = int.from_bytes(data[22:26], "little", signed=True)
         return abs(width), abs(height)
 
+    @staticmethod
+    def _normalize_uploaded_image(
+        image_bytes: bytes, content_type: str
+    ) -> tuple[str, str]:
+        ext = ThreeDSAdapter._image_ext_for_content_type(content_type)
+        cached_path = cache_image_from_bytes(image_bytes, ext=ext)
+
+        if ext != ".bmp":
+            return cached_path, content_type
+
+        try:
+            from PIL import Image
+        except ImportError:
+            return cached_path, content_type
+
+        try:
+            with Image.open(BytesIO(image_bytes)) as image:
+                converted = BytesIO()
+                image.convert("RGB").save(converted, format="PNG")
+            return cache_image_from_bytes(converted.getvalue(), ".png"), "image/png"
+        except Exception:
+            return cached_path, content_type
+
     def _remember_media(
         self,
         *,
@@ -1300,9 +1323,9 @@ class ThreeDSAdapter(BasePlatformAdapter):
         ack_cursor = self._cursor
 
         try:
-            cached_path = cache_image_from_bytes(
+            cached_path, cached_content_type = self._normalize_uploaded_image(
                 image_bytes,
-                ext=self._image_ext_for_content_type(content_type),
+                content_type,
             )
         except ValueError as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
@@ -1313,7 +1336,7 @@ class ThreeDSAdapter(BasePlatformAdapter):
             source=source,
             message_id=message_id,
             media_urls=[cached_path],
-            media_types=[content_type],
+            media_types=[cached_content_type],
         )
         await self.handle_message(event)
         return web.json_response(

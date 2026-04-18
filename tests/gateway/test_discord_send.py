@@ -78,3 +78,32 @@ async def test_send_retries_without_reference_when_reply_target_is_system_messag
     assert channel.send.await_count == 2
     assert send_calls[0]["reference"] is ref_msg
     assert send_calls[1]["reference"] is None
+
+
+@pytest.mark.asyncio
+async def test_edit_message_retries_transient_server_error_once():
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="***"))
+
+    class TransientDiscordError(RuntimeError):
+        def __init__(self, message: str, status: int = 503):
+            super().__init__(message)
+            self.status = status
+
+    msg = SimpleNamespace(content="old")
+    msg.edit = AsyncMock(
+        side_effect=[
+            TransientDiscordError("503 Service Unavailable"),
+            None,
+        ]
+    )
+    channel = SimpleNamespace(fetch_message=AsyncMock(return_value=msg))
+    adapter._client = SimpleNamespace(
+        get_channel=lambda _chat_id: channel,
+        fetch_channel=AsyncMock(),
+    )
+
+    result = await adapter.edit_message("555", "1234", "hello")
+
+    assert result.success is True
+    assert result.message_id == "1234"
+    assert msg.edit.await_count == 2

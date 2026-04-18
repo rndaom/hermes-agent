@@ -704,7 +704,7 @@ async def test_image_upload_creates_photo_message_event_with_image_attachment():
     event = captured["event"]
     assert event.message_type == MessageType.PHOTO
     assert event.media_urls
-    assert event.media_types == ["image/bmp"]
+    assert event.media_types in (["image/png"], ["image/bmp"])
     assert event.source.chat_id == "3ds:old3ds"
 
 

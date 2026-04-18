@@ -463,6 +463,27 @@ class DiscordAdapter(BasePlatformAdapter):
         # chunk only, default), "all" (reply-reference on every chunk).
         self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'
 
+    @staticmethod
+    def _is_transient_edit_error(exc: Exception) -> bool:
+        """Return True when a Discord edit failure looks transient/server-side."""
+        status = getattr(exc, "status", None)
+        if status is None:
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status", None)
+        if status in {500, 502, 503, 504}:
+            return True
+
+        err_lower = str(exc).lower()
+        transient_markers = (
+            "service unavailable",
+            "upstream connect error",
+            "server error",
+            "remote connection failure",
+            "transport failure",
+            "temporarily unavailable",
+        )
+        return any(marker in err_lower for marker in transient_markers)
+
     async def connect(self) -> bool:
         """Connect to Discord and start receiving events."""
         if not DISCORD_AVAILABLE:
@@ -868,11 +889,51 @@ class DiscordAdapter(BasePlatformAdapter):
             formatted = self.format_message(content)
             if len(formatted) > self.MAX_MESSAGE_LENGTH:
                 formatted = formatted[:self.MAX_MESSAGE_LENGTH - 3] + "..."
-            await msg.edit(content=formatted)
+
+            if getattr(msg, "content", None) == formatted:
+                return SendResult(success=True, message_id=message_id)
+
+            attempts = 3
+            last_exc: Exception | None = None
+            for attempt in range(1, attempts + 1):
+                try:
+                    await msg.edit(content=formatted)
+                    return SendResult(success=True, message_id=message_id)
+                except Exception as exc:
+                    err_lower = str(exc).lower()
+                    if "not modified" in err_lower:
+                        return SendResult(success=True, message_id=message_id)
+
+                    last_exc = exc
+                    if not self._is_transient_edit_error(exc) or attempt >= attempts:
+                        break
+
+                    delay = min(float(2 ** (attempt - 1)), 4.0)
+                    logger.warning(
+                        "[%s] Transient Discord edit failure for message %s (attempt %d/%d, retrying in %.1fs): %s",
+                        self.name,
+                        message_id,
+                        attempt,
+                        attempts,
+                        delay,
+                        exc,
+                    )
+                    await asyncio.sleep(delay)
+
+            if last_exc is not None:
+                raise last_exc
             return SendResult(success=True, message_id=message_id)
         except Exception as e:  # pragma: no cover - defensive logging
-            logger.error("[%s] Failed to edit Discord message %s: %s", self.name, message_id, e, exc_info=True)
-            return SendResult(success=False, error=str(e))
+            if self._is_transient_edit_error(e):
+                logger.warning(
+                    "[%s] Failed to edit Discord message %s after retries: %s",
+                    self.name,
+                    message_id,
+                    e,
+                )
+            else:
+                logger.error("[%s] Failed to edit Discord message %s: %s", self.name, message_id, e, exc_info=True)
+            return SendResult(success=False, error=str(e), retryable=self._is_transient_edit_error(e))
 
     async def _send_file_attachment(
         self,
@@ -1770,7 +1831,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 tree.add_command(cmd)
 
             if skipped:
-                logger.warning(
+                logger.info(
                     "[%s] Discord slash command limit reached (%d): %d skill(s) not registered",
                     self.name, _DISCORD_CMD_LIMIT, skipped,
                 )
