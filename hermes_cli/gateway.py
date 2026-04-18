@@ -17,6 +17,7 @@ PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
 from gateway.status import terminate_pid
 from gateway.restart import (
+    compute_service_stop_timeout,
     DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
     GATEWAY_SERVICE_RESTART_EXIT_CODE,
     parse_restart_drain_timeout,
@@ -914,7 +915,7 @@ def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) 
         "/sbin",
         "/bin",
     ]
-    restart_timeout = max(60, int(_get_restart_drain_timeout() or 0))
+    restart_timeout = compute_service_stop_timeout(_get_restart_drain_timeout())
 
     if system:
         username, group_name, home_dir = _system_service_identity(run_as_user)

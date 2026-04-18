@@ -91,7 +91,7 @@ class TestGeneratedSystemdUnits:
         assert "ExecStop=" not in unit
         assert "ExecReload=/bin/kill -USR1 $MAINPID" in unit
         assert f"RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}" in unit
-        assert "TimeoutStopSec=60" in unit
+        assert "TimeoutStopSec=75" in unit
 
     def test_user_unit_includes_resolved_node_directory_in_path(self, monkeypatch):
         monkeypatch.setattr(gateway_cli.shutil, "which", lambda cmd: "/home/test/.nvm/versions/node/v24.14.0/bin/node" if cmd == "node" else None)
@@ -107,8 +107,15 @@ class TestGeneratedSystemdUnits:
         assert "ExecStop=" not in unit
         assert "ExecReload=/bin/kill -USR1 $MAINPID" in unit
         assert f"RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}" in unit
-        assert "TimeoutStopSec=60" in unit
+        assert "TimeoutStopSec=75" in unit
         assert "WantedBy=multi-user.target" in unit
+
+    def test_user_unit_leaves_headroom_beyond_restart_drain_timeout(self, monkeypatch):
+        monkeypatch.setattr(gateway_cli, "_get_restart_drain_timeout", lambda: 75.0)
+
+        unit = gateway_cli.generate_systemd_unit(system=False)
+
+        assert "TimeoutStopSec=90" in unit
 
 
 class TestGatewayStopCleanup:
