@@ -1474,6 +1474,34 @@ class GatewayRunner:
         )
         return True
 
+    def _describe_draining_agents(self, limit: int = 5) -> str:
+        """Summarize the sessions currently blocking shutdown/restart drain."""
+        if not self._running_agents:
+            return "none"
+
+        now = time.time()
+        details = []
+        items = list(self._running_agents.items())
+        for session_key, agent in items[:limit]:
+            state = "pending" if agent is _AGENT_PENDING_SENTINEL else "running"
+            started_at = self._running_agents_ts.get(session_key)
+            if started_at:
+                age = max(0.0, now - started_at)
+                age_part = f"age={int(round(age))}s"
+            else:
+                age_part = "age=unknown"
+
+            summary_parts = [f"state={state}", age_part]
+            session_id = getattr(agent, "session_id", None) if agent is not _AGENT_PENDING_SENTINEL else None
+            if session_id:
+                summary_parts.append(f"session_id={session_id}")
+            details.append(f"{session_key} ({', '.join(summary_parts)})")
+
+        extra = len(items) - limit
+        if extra > 0:
+            details.append(f"... +{extra} more")
+        return "; ".join(details)
+
     async def _drain_active_agents(self, timeout: float) -> tuple[Dict[str, Any], bool]:
         snapshot = self._snapshot_running_agents()
         last_active_count = self._running_agent_count()
@@ -2241,10 +2269,12 @@ class GatewayRunner:
             timeout = self._restart_drain_timeout
             active_agents, timed_out = await self._drain_active_agents(timeout)
             if timed_out:
+                blocking_agents = self._describe_draining_agents()
                 logger.warning(
-                    "Gateway drain timed out after %.1fs with %d active agent(s); interrupting remaining work.",
+                    "Gateway drain timed out after %.1fs with %d active agent(s): %s; interrupting remaining work.",
                     timeout,
                     self._running_agent_count(),
+                    blocking_agents,
                 )
                 self._interrupt_running_agents(
                     "Gateway restarting"
