@@ -803,6 +803,14 @@ def clear_task_env_overrides(task_id: str):
     """
     _task_env_overrides.pop(task_id, None)
 
+
+def get_task_env_override(task_id: str, key: str = None, default: Any = None):
+    """Read a task-specific environment override without mutating global state."""
+    overrides = _task_env_overrides.get(task_id, {})
+    if key is None:
+        return dict(overrides)
+    return overrides.get(key, default)
+
 # Configuration from environment variables
 
 def _parse_env_var(name: str, default: str, converter=int, type_label: str = "integer"):

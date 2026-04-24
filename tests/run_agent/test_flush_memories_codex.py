@@ -69,8 +69,17 @@ def _make_agent(monkeypatch, api_mode="chat_completions", provider="openrouter")
     return agent
 
 
-def _chat_response_with_memory_call():
+def _chat_response_with_memory_call(scope=None, ttl_days=None):
     """Simulated chat completions response with a memory tool call."""
+    args = {
+        "action": "add",
+        "target": "notes",
+        "content": "User prefers dark mode.",
+    }
+    if scope is not None:
+        args["scope"] = scope
+    if ttl_days is not None:
+        args["ttl_days"] = ttl_days
     return SimpleNamespace(
         choices=[SimpleNamespace(
             message=SimpleNamespace(
@@ -78,11 +87,7 @@ def _chat_response_with_memory_call():
                 tool_calls=[SimpleNamespace(
                     function=SimpleNamespace(
                         name="memory",
-                        arguments=json.dumps({
-                            "action": "add",
-                            "target": "notes",
-                            "content": "User prefers dark mode.",
-                        }),
+                        arguments=json.dumps(args),
                     ),
                 )],
             ),
@@ -205,6 +210,24 @@ class TestFlushMemoriesUsesAuxiliaryClient:
         assert call_kwargs.kwargs["action"] == "add"
         assert call_kwargs.kwargs["target"] == "notes"
         assert "dark mode" in call_kwargs.kwargs["content"]
+
+    def test_flush_forwards_scope_and_ttl_to_memory_tool(self, monkeypatch):
+        agent = _make_agent(monkeypatch, api_mode="chat_completions", provider="openrouter")
+
+        mock_response = _chat_response_with_memory_call(scope="project", ttl_days=7)
+
+        with patch("agent.auxiliary_client.call_llm", return_value=mock_response):
+            messages = [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"},
+                {"role": "user", "content": "Note this"},
+            ]
+            with patch("tools.memory_tool.memory_tool", return_value="Saved.") as mock_memory:
+                agent.flush_memories(messages)
+
+        kwargs = mock_memory.call_args.kwargs
+        assert kwargs["scope"] == "project"
+        assert kwargs["ttl_days"] == 7
 
     def test_flush_strips_artifacts_from_messages(self, monkeypatch):
         """After flush, the flush prompt and any response should be removed from messages."""
