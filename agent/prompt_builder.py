@@ -149,6 +149,8 @@ MEMORY_GUIDANCE = (
     "Prioritize what reduces future user steering — the most valuable memory is one "
     "that prevents the user from having to correct or remind you again. "
     "User preferences and recurring corrections matter more than procedural task details.\n"
+    "Project-specific details should usually be saved with project scope so they only "
+    "reappear in that same repo/project, and use ttl_days when the detail may go stale.\n"
     "Do NOT save task progress, session outcomes, completed-work logs, or temporary TODO "
     "state to memory; use session_search to recall those from past transcripts. "
     "If you've discovered a new way to do something, solved a problem that could be "
