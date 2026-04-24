@@ -72,7 +72,7 @@ from model_tools import (
     handle_function_call,
     check_toolset_requirements,
 )
-from tools.terminal_tool import cleanup_vm, get_active_env, is_persistent_env
+from tools.terminal_tool import cleanup_vm, get_active_env, get_task_env_override, is_persistent_env
 from tools.tool_result_storage import maybe_persist_tool_result, enforce_turn_budget
 from tools.interrupt import set_interrupt as _set_interrupt
 from tools.browser_tool import cleanup_browser
@@ -1521,6 +1521,8 @@ class AIAgent:
         
         # Cached system prompt -- built once per session, only rebuilt on compression
         self._cached_system_prompt: Optional[str] = None
+        self._current_task_id: Optional[str] = None
+        self._last_context_working_dir: Optional[str] = None
         
         # Filesystem checkpoint manager (transparent — not a tool)
         from tools.checkpoint_manager import CheckpointManager
@@ -1568,6 +1570,8 @@ class AIAgent:
             _agent_cfg = _load_agent_config()
         except Exception:
             _agent_cfg = {}
+        if not isinstance(_agent_cfg, dict):
+            _agent_cfg = {}
         # Cache only the derived auxiliary compression context override that is
         # needed later by the startup feasibility check.  Avoid exposing a
         # broad pseudo-public config object on the agent instance.
@@ -1579,11 +1583,17 @@ class AIAgent:
         self._user_profile_enabled = False
         self._memory_nudge_interval = 10
         self._memory_flush_min_turns = 6
+        self._compression_memory_flush_enabled = False
         self._turns_since_memory = 0
         self._iters_since_skill = 0
+        mem_config = _agent_cfg.get("memory", {})
+        if not isinstance(mem_config, dict):
+            mem_config = {}
+        self._compression_memory_flush_enabled = (
+            str(mem_config.get("flush_on_compress", False)).lower() in ("true", "1", "yes")
+        )
         if not skip_memory:
             try:
-                mem_config = _agent_cfg.get("memory", {})
                 self._memory_enabled = mem_config.get("memory_enabled", False)
                 self._user_profile_enabled = mem_config.get("user_profile_enabled", False)
                 self._memory_nudge_interval = int(mem_config.get("nudge_interval", 10))
@@ -1593,6 +1603,9 @@ class AIAgent:
                     self._memory_store = MemoryStore(
                         memory_char_limit=mem_config.get("memory_char_limit", 2200),
                         user_char_limit=mem_config.get("user_char_limit", 1375),
+                        project_memory_char_limit=mem_config.get("project_memory_char_limit", 1200),
+                        project_memory_ttl_days=mem_config.get("project_memory_ttl_days", 30),
+                        working_dir=os.getenv("TERMINAL_CWD") or os.getcwd(),
                     )
                     self._memory_store.load_from_disk()
             except Exception:
@@ -1920,6 +1933,7 @@ class AIAgent:
         self._subdirectory_hints = SubdirectoryHintTracker(
             working_dir=os.getenv("TERMINAL_CWD") or None,
         )
+        self._last_context_working_dir = self._resolve_current_working_dir(self.session_id)
         self._user_turn_count = 0
 
         # Cumulative token usage for the session
@@ -3028,7 +3042,9 @@ class AIAgent:
         "1. Has the user revealed things about themselves — their persona, desires, "
         "preferences, or personal details worth remembering?\n"
         "2. Has the user expressed expectations about how you should behave, their work "
-        "style, or ways they want you to operate?\n\n"
+        "style, or ways they want you to operate?\n"
+        "3. If a fact is project-specific rather than globally durable, save it with project "
+        "scope instead of global memory, and use ttl_days when it may go stale.\n\n"
         "If something stands out, save it using the memory tool. "
         "If nothing is worth saving, just say 'Nothing to save.' and stop."
     )
@@ -3048,7 +3064,8 @@ class AIAgent:
         "**Memory**: Has the user revealed things about themselves — their persona, "
         "desires, preferences, or personal details? Has the user expressed expectations "
         "about how you should behave, their work style, or ways they want you to operate? "
-        "If so, save using the memory tool.\n\n"
+        "If so, save using the memory tool. Use project scope for project-specific facts "
+        "that should not appear in unrelated sessions, and ttl_days when they may go stale.\n\n"
         "**Skills**: Was a non-trivial approach used to complete a task that required trial "
         "and error, or changing course due to experiential findings along the way, or did "
         "the user expect or desire a different method or outcome? If a relevant skill "
@@ -4480,7 +4497,7 @@ class AIAgent:
             # mode).  The gateway process runs from the hermes-agent install
             # dir, so os.getcwd() would pick up the repo's AGENTS.md and
             # other dev files — inflating token usage by ~10k for no benefit.
-            _context_cwd = os.getenv("TERMINAL_CWD") or None
+            _context_cwd = self._resolve_current_working_dir(self._current_task_id)
             context_files_prompt = build_context_files_prompt(
                 cwd=_context_cwd, skip_soul=_soul_loaded)
             if context_files_prompt:
@@ -4725,7 +4742,73 @@ class AIAgent:
 
         return None
 
-    def _invalidate_system_prompt(self):
+    def _resolve_current_working_dir(self, effective_task_id: Optional[str] = None) -> str:
+        """Best-effort current working directory for dynamic prompt/memory scoping."""
+        candidates = []
+        if effective_task_id:
+            try:
+                env = get_active_env(effective_task_id)
+            except Exception:
+                env = None
+            env_cwd = getattr(env, "cwd", None)
+            if env_cwd:
+                candidates.append(env_cwd)
+            task_cwd = get_task_env_override(effective_task_id, "cwd")
+            if task_cwd:
+                candidates.append(task_cwd)
+
+        configured_cwd = os.getenv("TERMINAL_CWD")
+        if configured_cwd:
+            candidates.append(configured_cwd)
+        candidates.append(os.getcwd())
+
+        for candidate in candidates:
+            if not candidate:
+                continue
+            try:
+                return str(Path(candidate).expanduser().resolve())
+            except Exception:
+                return str(candidate)
+        return os.getcwd()
+
+    def _sync_dynamic_session_context(
+        self,
+        effective_task_id: Optional[str],
+        *,
+        system_message: Optional[str] = None,
+    ) -> bool:
+        """Rebuild the cached prompt when cwd/project scope changes mid-session."""
+        current_working_dir = self._resolve_current_working_dir(effective_task_id)
+        cwd_changed = current_working_dir != self._last_context_working_dir
+        memory_changed = False
+
+        if self._memory_store:
+            try:
+                memory_changed = bool(self._memory_store.refresh_project_context(current_working_dir))
+            except Exception:
+                logger.debug("Failed to refresh project-scoped memory context", exc_info=True)
+
+        if not (cwd_changed or memory_changed):
+            return False
+
+        self._last_context_working_dir = current_working_dir
+
+        if self._memory_store:
+            try:
+                self._memory_store.load_from_disk()
+            except Exception:
+                logger.debug("Failed to reload memory store after cwd/project change", exc_info=True)
+
+        if self._cached_system_prompt is not None:
+            self._cached_system_prompt = self._build_system_prompt(system_message)
+            if self._session_db and self.session_id:
+                try:
+                    self._session_db.update_system_prompt(self.session_id, self._cached_system_prompt)
+                except Exception:
+                    logger.debug("Session DB update_system_prompt failed after cwd/project change", exc_info=True)
+        return True
+
+    def _invalidate_system_prompt(self, effective_task_id: Optional[str] = None):
         """
         Invalidate the cached system prompt, forcing a rebuild on the next turn.
         
@@ -4734,6 +4817,7 @@ class AIAgent:
         """
         self._cached_system_prompt = None
         if self._memory_store:
+            self._memory_store.refresh_project_context(self._resolve_current_working_dir(effective_task_id))
             self._memory_store.load_from_disk()
 
     @staticmethod
@@ -8076,7 +8160,14 @@ class AIAgent:
 
             # Extract tool calls from the response, handling all API formats
             tool_calls = []
-            if self.api_mode == "codex_responses" and not _aux_available:
+            if _aux_available and hasattr(response, "choices") and response.choices:
+                # Auxiliary calls return OpenAI-shaped responses regardless of
+                # the primary transport; extract them directly because some
+                # transports expect stricter provider-specific metadata.
+                _aux_msg = response.choices[0].message
+                if hasattr(_aux_msg, "tool_calls") and _aux_msg.tool_calls:
+                    tool_calls = _aux_msg.tool_calls
+            elif self.api_mode == "codex_responses" and not _aux_available:
                 _ct_flush = self._get_transport()
                 _cnr_flush = _ct_flush.normalize_response(response) if _ct_flush is not None else None
                 if _cnr_flush and _cnr_flush.tool_calls:
@@ -8117,26 +8208,23 @@ class AIAgent:
                         args = json.loads(tc.function.arguments)
                         flush_target = args.get("target", "memory")
                         from tools.memory_tool import memory_tool as _memory_tool
-                        _memory_tool(
+                        flush_working_dir = self._resolve_current_working_dir(self._current_task_id)
+                        if self._memory_store:
+                            try:
+                                self._memory_store.refresh_project_context(flush_working_dir)
+                            except Exception:
+                                logger.debug("Failed to refresh memory store before flush", exc_info=True)
+                        flush_result = _memory_tool(
                             action=args.get("action"),
                             target=flush_target,
                             content=args.get("content"),
                             old_text=args.get("old_text"),
+                            scope=args.get("scope"),
+                            ttl_days=args.get("ttl_days"),
                             store=self._memory_store,
+                            working_dir=flush_working_dir,
                         )
-                        if self._memory_manager and args.get("action") in ("add", "replace"):
-                            try:
-                                self._memory_manager.on_memory_write(
-                                    args.get("action", ""),
-                                    flush_target,
-                                    args.get("content", ""),
-                                    metadata=self._build_memory_write_metadata(
-                                        write_origin="memory_flush",
-                                        execution_context="flush_memories",
-                                    ),
-                                )
-                            except Exception:
-                                pass
+                        self._maybe_mirror_memory_write(args, target=flush_target, tool_result=flush_result)
                         if not self.quiet_mode:
                             print(f"  🧠 Memory flush: saved to {args.get('target', 'memory')}")
                     except Exception as e:
@@ -8174,10 +8262,14 @@ class AIAgent:
             focus_topic,
         )
         # Pre-compression memory flush: let the model save memories before they're lost
-        self.flush_memories(messages, min_turns=0)
+        # only when explicitly enabled. Lean mode keeps compression from creating
+        # new durable memory out of stale task context.
+        if self._compression_memory_flush_enabled:
+            self.flush_memories(messages, min_turns=0)
 
-        # Notify external memory provider before compression discards context
-        if self._memory_manager:
+        # Notify external memory providers before compression discards context,
+        # but only when compression-time persistence is explicitly enabled.
+        if self._compression_memory_flush_enabled and self._memory_manager:
             try:
                 self._memory_manager.on_pre_compress(messages)
             except Exception:
@@ -8203,7 +8295,7 @@ class AIAgent:
         if todo_snapshot:
             compressed.append({"role": "user", "content": todo_snapshot})
 
-        self._invalidate_system_prompt()
+        self._invalidate_system_prompt(task_id)
         new_system_prompt = self._build_system_prompt(system_message)
         self._cached_system_prompt = new_system_prompt
 
@@ -8313,6 +8405,39 @@ class AIAgent:
             parent_agent=self,
         )
 
+    def _maybe_mirror_memory_write(
+        self,
+        function_args: dict,
+        *,
+        target: str,
+        tool_result: Optional[str] = None,
+    ) -> None:
+        """Mirror successful global built-in memory writes to external providers."""
+        if not self._memory_manager:
+            return
+        action = function_args.get("action")
+        if action not in ("add", "replace"):
+            return
+        from tools.memory_tool import _normalize_scope as _normalize_memory_scope
+        effective_scope = _normalize_memory_scope(function_args.get("scope"), default="global")
+        if effective_scope != "global":
+            return
+        if tool_result is not None:
+            try:
+                parsed = json.loads(tool_result)
+                if isinstance(parsed, dict) and not parsed.get("success", False):
+                    return
+            except Exception:
+                return
+        try:
+            self._memory_manager.on_memory_write(
+                action,
+                target,
+                function_args.get("content", ""),
+            )
+        except Exception:
+            pass
+
     def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str,
                      tool_call_id: Optional[str] = None, messages: list = None) -> str:
         """Invoke a single tool and return the result string. No display logic.
@@ -8354,27 +8479,23 @@ class AIAgent:
         elif function_name == "memory":
             target = function_args.get("target", "memory")
             from tools.memory_tool import memory_tool as _memory_tool
+            current_working_dir = self._resolve_current_working_dir(effective_task_id)
+            if self._memory_store:
+                try:
+                    self._memory_store.refresh_project_context(current_working_dir)
+                except Exception:
+                    logger.debug("Failed to refresh memory store before memory tool call", exc_info=True)
             result = _memory_tool(
                 action=function_args.get("action"),
                 target=target,
                 content=function_args.get("content"),
                 old_text=function_args.get("old_text"),
+                scope=function_args.get("scope"),
+                ttl_days=function_args.get("ttl_days"),
                 store=self._memory_store,
+                working_dir=current_working_dir,
             )
-            # Bridge: notify external memory provider of built-in memory writes
-            if self._memory_manager and function_args.get("action") in ("add", "replace"):
-                try:
-                    self._memory_manager.on_memory_write(
-                        function_args.get("action", ""),
-                        target,
-                        function_args.get("content", ""),
-                        metadata=self._build_memory_write_metadata(
-                            task_id=effective_task_id,
-                            tool_call_id=tool_call_id,
-                        ),
-                    )
-                except Exception:
-                    pass
+            self._maybe_mirror_memory_write(function_args, target=target, tool_result=result)
             return result
         elif self._memory_manager and self._memory_manager.has_tool(function_name):
             return self._memory_manager.handle_tool_call(function_name, function_args)
@@ -8869,27 +8990,23 @@ class AIAgent:
             elif function_name == "memory":
                 target = function_args.get("target", "memory")
                 from tools.memory_tool import memory_tool as _memory_tool
+                current_working_dir = self._resolve_current_working_dir(effective_task_id)
+                if self._memory_store:
+                    try:
+                        self._memory_store.refresh_project_context(current_working_dir)
+                    except Exception:
+                        logger.debug("Failed to refresh memory store before memory tool call", exc_info=True)
                 function_result = _memory_tool(
                     action=function_args.get("action"),
                     target=target,
                     content=function_args.get("content"),
                     old_text=function_args.get("old_text"),
+                    scope=function_args.get("scope"),
+                    ttl_days=function_args.get("ttl_days"),
                     store=self._memory_store,
+                    working_dir=current_working_dir,
                 )
-                # Bridge: notify external memory provider of built-in memory writes
-                if self._memory_manager and function_args.get("action") in ("add", "replace"):
-                    try:
-                        self._memory_manager.on_memory_write(
-                            function_args.get("action", ""),
-                            target,
-                            function_args.get("content", ""),
-                            metadata=self._build_memory_write_metadata(
-                                task_id=effective_task_id,
-                                tool_call_id=getattr(tool_call, "id", None),
-                            ),
-                        )
-                    except Exception:
-                        pass
+                self._maybe_mirror_memory_write(function_args, target=target, tool_result=function_result)
                 tool_duration = time.time() - tool_start_time
                 if self._should_emit_quiet_tool_messages():
                     self._vprint(f"  {_get_cute_tool_message_impl('memory', function_args, tool_duration, result=function_result)}")
@@ -9348,7 +9465,6 @@ class AIAgent:
         # state registry.  Set BEFORE any tool dispatch so snapshots taken at
         # child-launch time see the parent's real id, not None.
         self._current_task_id = effective_task_id
-        
         # Reset retry counters and iteration budget at the start of each turn
         # so subagent usage from a previous turn doesn't eat into the next one.
         self._invalid_tool_retries = 0
@@ -9649,6 +9765,9 @@ class AIAgent:
         while (api_call_count < self.max_iterations and self.iteration_budget.remaining > 0) or self._budget_grace_call:
             # Reset per-turn checkpoint dedup so each iteration can take one snapshot
             self._checkpoint_mgr.new_turn()
+
+            if self._sync_dynamic_session_context(effective_task_id, system_message=system_message):
+                active_system_prompt = self._cached_system_prompt or active_system_prompt
 
             # Check for interrupt request (e.g., user sent new message)
             if self._interrupt_requested:
