@@ -715,6 +715,21 @@ DEFAULT_CONFIG = {
         "user_profile_enabled": True,
         "memory_char_limit": 2200,   # ~800 tokens at 2.75 chars/token
         "user_char_limit": 1375,     # ~500 tokens at 2.75 chars/token
+        # Additional budget for project-scoped memory injected only when Hermes is
+        # back in the matching project.
+        "project_memory_char_limit": 1200,
+        # Project-scoped memories expire after this many days by default to reduce
+        # stale project context from accumulating forever.
+        "project_memory_ttl_days": 30,
+        # Background memory review cadence; 0 disables periodic save nudges.
+        "nudge_interval": 10,
+        # Minimum user turns before a manual/session-end flush can persist memory.
+        "flush_min_turns": 6,
+        # Lean default: do NOT auto-save built-in or provider-backed memory during
+        # context compression unless the user opts in. Compression often happens under
+        # context pressure, where task-specific details are more likely than durable
+        # cross-session facts.
+        "flush_on_compress": False,
         # External memory provider plugin (empty = built-in only).
         # Set to a provider name to activate: "openviking", "mem0",
         # "hindsight", "holographic", "retaindb", "byterover".
