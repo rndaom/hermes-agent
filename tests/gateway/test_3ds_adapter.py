@@ -26,6 +26,17 @@ def _create_app(adapter):
     return app
 
 
+def _sample_bmp_bytes(*, top_down: bool = False) -> bytes:
+    return (
+        b"BM>\x00\x00\x00\x00\x00\x00\x006\x00\x00\x00(\x00\x00\x00"
+        + b"\x02\x00\x00\x00"
+        + int.to_bytes(-1 if top_down else 1, 4, "little", signed=True)
+        + b"\x01\x00\x18\x00\x00\x00\x00\x00"
+        + b"\x08\x00\x00\x00\x13\x0b\x00\x00\x13\x0b\x00\x00\x00\x00\x00\x00"
+        + b"\x00\x00\x00\x00\x00\x00\xff\x00\x00\x00\xff\x00\x00"
+    )
+
+
 def test_platform_enum_has_3ds():
     assert Platform.THREEDS.value == "3ds"
 
@@ -684,12 +695,7 @@ async def test_image_upload_creates_photo_message_event_with_image_attachment():
     async with TestClient(TestServer(app)) as cli:
         resp = await cli.post(
             "/api/v2/image?device_id=old3ds&conversation_id=main",
-            data=(
-                b"BM>\x00\x00\x00\x00\x00\x00\x006\x00\x00\x00(\x00\x00\x00"
-                b"\x02\x00\x00\x00\x01\x00\x00\x00\x01\x00\x18\x00\x00\x00\x00\x00"
-                b"\x08\x00\x00\x00\x13\x0b\x00\x00\x13\x0b\x00\x00\x00\x00\x00\x00"
-                b"\x00\x00\x00\x00\x00\x00\xff\x00\x00\x00\xff\x00\x00"
-            ),
+            data=_sample_bmp_bytes(top_down=True),
             headers={
                 "Authorization": "Bearer ***",
                 "Content-Type": "image/bmp",
@@ -704,7 +710,8 @@ async def test_image_upload_creates_photo_message_event_with_image_attachment():
     event = captured["event"]
     assert event.message_type == MessageType.PHOTO
     assert event.media_urls
-    assert event.media_types in (["image/png"], ["image/bmp"])
+    assert event.media_types == ["image/png"]
+    assert Path(event.media_urls[0]).read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
     assert event.source.chat_id == "3ds:old3ds"
 
 
@@ -715,12 +722,7 @@ async def test_send_image_file_emits_media_event_and_serves_preview(tmp_path):
 
     adapter = ThreeDSAdapter(PlatformConfig(enabled=True, extra={"auth_token": "tok"}))
     image_path = tmp_path / "sample.bmp"
-    image_path.write_bytes(
-        b"BM>\x00\x00\x00\x00\x00\x00\x006\x00\x00\x00(\x00\x00\x00"
-        b"\x02\x00\x00\x00\x01\x00\x00\x00\x01\x00\x18\x00\x00\x00\x00\x00"
-        b"\x08\x00\x00\x00\x13\x0b\x00\x00\x13\x0b\x00\x00\x00\x00\x00\x00"
-        b"\x00\x00\x00\x00\x00\x00\xff\x00\x00\x00\xff\x00\x00"
-    )
+    image_path.write_bytes(_sample_bmp_bytes())
     app = _create_app(adapter)
 
     async with TestClient(TestServer(app)) as cli:

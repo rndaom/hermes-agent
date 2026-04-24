@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import gateway.run as gateway_run
 from gateway.platforms.base import MessageEvent
 from gateway.restart import GATEWAY_SERVICE_RESTART_EXIT_CODE
 from gateway.session import build_session_key
@@ -112,6 +113,61 @@ async def test_gateway_stop_interrupts_after_drain_timeout():
     running_agent.interrupt.assert_called_once_with("Gateway shutting down")
     disconnect_mock.assert_awaited_once()
     assert runner._shutdown_event.is_set() is True
+
+
+def test_describe_draining_agents_includes_session_state_and_age(monkeypatch):
+    runner, _adapter = make_restart_runner()
+    monkeypatch.setattr(gateway_run.time, "time", lambda: 200.0)
+
+    running_agent = MagicMock()
+    running_agent.session_id = "sess-running"
+    runner._running_agents = {
+        "discord:chat:thread": running_agent,
+        "telegram:pending": gateway_run._AGENT_PENDING_SENTINEL,
+    }
+    runner._running_agents_ts = {
+        "discord:chat:thread": 188.2,
+        "telegram:pending": 195.0,
+    }
+
+    summary = runner._describe_draining_agents()
+
+    assert "discord:chat:thread" in summary
+    assert "state=running" in summary
+    assert "session_id=sess-running" in summary
+    assert "age=12s" in summary
+    assert "telegram:pending" in summary
+    assert "state=pending" in summary
+    assert "age=5s" in summary
+
+
+@pytest.mark.asyncio
+async def test_gateway_stop_logs_blocking_session_details_after_drain_timeout(monkeypatch):
+    runner, adapter = make_restart_runner()
+    runner._restart_drain_timeout = 0.0
+    adapter.disconnect = AsyncMock()
+
+    running_agent = MagicMock()
+    running_agent.session_id = "sess-1"
+    runner._running_agents = {"discord:123:456": running_agent}
+    runner._running_agents_ts = {"discord:123:456": 90.0}
+    monkeypatch.setattr(gateway_run.time, "time", lambda: 100.0)
+
+    with (
+        patch("gateway.status.remove_pid_file"),
+        patch("gateway.status.write_runtime_status"),
+        patch("gateway.run.logger") as mock_logger,
+    ):
+        await runner.stop()
+
+    warning_call = mock_logger.warning.call_args_list[0]
+    assert "Gateway drain timed out after %.1fs with %d active agent(s): %s; interrupting remaining work." in warning_call.args[0]
+    assert warning_call.args[1] == 0.0
+    assert warning_call.args[2] == 1
+    assert "discord:123:456" in warning_call.args[3]
+    assert "state=running" in warning_call.args[3]
+    assert "session_id=sess-1" in warning_call.args[3]
+    assert "age=10s" in warning_call.args[3]
 
 
 @pytest.mark.asyncio

@@ -25,6 +25,7 @@ import time
 import uuid
 from typing import Any, Awaitable, Callable, Dict, Optional
 from urllib.parse import urlsplit
+import zlib
 
 try:
     from aiohttp import web
@@ -63,6 +64,65 @@ IMAGE_PREVIEW_MAX_WIDTH = 256
 IMAGE_PREVIEW_MAX_HEIGHT = 128
 MEDIA_CACHE_LIMIT = 64
 IMAGE_PREVIEW_CONTENT_TYPE = "image/bmp"
+
+
+def _png_chunk(chunk_type: bytes, payload: bytes) -> bytes:
+    length = len(payload).to_bytes(4, "big")
+    checksum = zlib.crc32(chunk_type)
+    checksum = zlib.crc32(payload, checksum) & 0xFFFFFFFF
+    return length + chunk_type + payload + checksum.to_bytes(4, "big")
+
+
+def _convert_bmp_bytes_to_png(image_bytes: bytes) -> bytes | None:
+    if len(image_bytes) < 54 or image_bytes[:2] != b"BM":
+        return None
+
+    pixel_offset = int.from_bytes(image_bytes[10:14], "little")
+    dib_header_size = int.from_bytes(image_bytes[14:18], "little")
+    width = int.from_bytes(image_bytes[18:22], "little", signed=True)
+    height_signed = int.from_bytes(image_bytes[22:26], "little", signed=True)
+    planes = int.from_bytes(image_bytes[26:28], "little")
+    bits_per_pixel = int.from_bytes(image_bytes[28:30], "little")
+    compression = int.from_bytes(image_bytes[30:34], "little")
+
+    if dib_header_size < 40 or width <= 0 or height_signed == 0 or planes != 1:
+        return None
+    if compression != 0 or bits_per_pixel not in (24, 32):
+        return None
+
+    height = abs(height_signed)
+    bytes_per_pixel = bits_per_pixel // 8
+    row_stride = ((width * bytes_per_pixel) + 3) & ~3
+    pixel_bytes = row_stride * height
+    if pixel_offset + pixel_bytes > len(image_bytes):
+        return None
+
+    raw = bytearray()
+    top_down = height_signed < 0
+    for row in range(height):
+        source_row = row if top_down else (height - 1 - row)
+        row_offset = pixel_offset + (source_row * row_stride)
+        raw.append(0)
+
+        for column in range(width):
+            pixel_offset_in_row = row_offset + (column * bytes_per_pixel)
+            blue = image_bytes[pixel_offset_in_row]
+            green = image_bytes[pixel_offset_in_row + 1]
+            red = image_bytes[pixel_offset_in_row + 2]
+            raw.extend((red, green, blue))
+
+    header = b"\x89PNG\r\n\x1a\n"
+    ihdr = (
+        width.to_bytes(4, "big")
+        + height.to_bytes(4, "big")
+        + b"\x08"
+        + b"\x02"
+        + b"\x00"
+        + b"\x00"
+        + b"\x00"
+    )
+    compressed = zlib.compress(bytes(raw), level=6)
+    return header + _png_chunk(b"IHDR", ihdr) + _png_chunk(b"IDAT", compressed) + _png_chunk(b"IEND", b"")
 
 
 class ThreeDSStreamConsumer:
@@ -367,6 +427,10 @@ class ThreeDSAdapter(BasePlatformAdapter):
 
         if ext != ".bmp":
             return cached_path, content_type
+
+        converted_png = _convert_bmp_bytes_to_png(image_bytes)
+        if converted_png is not None:
+            return cache_image_from_bytes(converted_png, ".png"), "image/png"
 
         try:
             from PIL import Image
